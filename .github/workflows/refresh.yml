@@ -1,0 +1,29 @@
+name: Refresh aviation data
+
+on:
+  schedule:
+    # Weekly check - NATS/CAA publish on a ~28-day AIRAC cycle, checking
+    # weekly catches each release promptly without hammering their servers.
+    - cron: '0 3 * * 1'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build data
+        run: node scripts/build-data.js
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --staged --quiet || git commit -m "Refresh aviation data $(date -u +%Y-%m-%d)"
+          git push

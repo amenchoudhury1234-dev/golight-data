@@ -1,0 +1,13 @@
+{
+  "generatedAt": "2026-08-27T10:10:29.224Z",
+  "counts": {
+    "airports": 153,
+    "vrps": 407,
+    "airfields": 448
+  },
+  "sources": {
+    "airports": "https://davidmegginson.github.io/ourairports-data/airports.csv",
+    "vrps": "https://nats-uk.ead-it.com/cms-nats/export/sites/default/en/Publications/digital-datasets/VRP/EG_VRP_DS_AREA1_FULL_20260806_CSV.zip",
+    "airfields": "https://nats-uk.ead-it.com/cms-nats/opencms/en/Charts/vfr-charts/Resources/VFR-Database-Unlicensed-Military-and-Foreign-Aerosites-06-Aug-2026.csv"
+  }
+}
