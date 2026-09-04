@@ -1,13 +1,19 @@
 {
-  "generatedAt": "2026-08-31T09:02:47.572Z",
+  "generatedAt": "2026-09-04T20:23:15.739Z",
   "counts": {
-    "airports": 155,
-    "vrps": 407,
-    "airfields": 448
+    "ukAirports": 155,
+    "vrps": 404,
+    "ukAirfields": 448,
+    "usAirports": 1761,
+    "usAirfields": 22575
   },
   "sources": {
     "airports": "https://davidmegginson.github.io/ourairports-data/airports.csv",
-    "vrps": "https://nats-uk.ead-it.com/cms-nats/export/sites/default/en/Publications/digital-datasets/VRP/EG_VRP_DS_AREA1_FULL_20260806_CSV.zip",
-    "airfields": "https://nats-uk.ead-it.com/cms-nats/opencms/en/Charts/vfr-charts/Resources/VFR-Database-Unlicensed-Military-and-Foreign-Aerosites-06-Aug-2026.csv"
+    "vrps": "https://nats-uk.ead-it.com/cms-nats/export/sites/default/en/Publications/digital-datasets/VRP/EG_VRP_DS_AREA1_FULL_20260903_CSV.zip",
+    "ukAirfields": "https://nats-uk.ead-it.com/cms-nats/opencms/en/Charts/vfr-charts/Resources/VFR-Database-Unlicensed-Military-and-Foreign-Aerosites-06-Aug-2026.csv",
+    "usAirfields": "https://davidmegginson.github.io/ourairports-data/airports.csv"
+  },
+  "notes": {
+    "usVrps": "No open US equivalent to NATS VRPs found - VFR reporting points are not published in a structured national dataset. US routes have no VRP suggestions in the app."
   }
 }

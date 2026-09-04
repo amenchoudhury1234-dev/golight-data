@@ -1,13 +1,16 @@
-// Refreshes GoLight's UK aviation reference data (airports, VRPs, small
+// Refreshes Minima's UK + US aviation reference data (airports, VRPs, small
 // airfields) from official/open sources. Run on a schedule via GitHub
 // Actions so the app's data can update without an app store release.
 //
 // Sources:
 //  - OurAirports.com (public domain) - full world airport list, filtered
-//    to UK + Crown Dependencies with a valid ICAO code.
+//    to UK + Crown Dependencies, and separately to the US, each requiring
+//    a valid ICAO code. US "unlicensed" small_airport/heliport records
+//    (no 4-letter ICAO) come from the same CSV.
 //  - NATS AIS digital datasets (nats-uk.ead-it.com) - official CAA/NATS
 //    Visual Reference Points and unlicensed/uncertificated aerosites.
 //    Licensed "unrestricted access" but "not for resale" - see README.
+//    UK-only: no open, structured US equivalent for VRPs was found.
 
 const fs = require('fs');
 const path = require('path');
@@ -73,12 +76,22 @@ function findLatestDatedUrl(html, hrefRegex) {
   return (eligible.length > 0 ? eligible[eligible.length - 1] : candidates[0]).url;
 }
 
-async function buildAirports() {
+// Shared by both regions - OurAirports is the one source that's genuinely
+// global, not UK-specific, so extending this to a second country is just a
+// different country filter over the same CSV, not a new pipeline.
+async function fetchOurAirportsCsv() {
   const csv = await fetchText('https://davidmegginson.github.io/ourairports-data/airports.csv');
   const lines = csv.split('\n');
   const header = parseCsvLine(lines[0]);
   const idx = Object.fromEntries(header.map((h, i) => [h, i]));
-  const ALLOWED_COUNTRIES = new Set(['GB', 'IM', 'JE', 'GG']);
+  return { lines, idx };
+}
+
+// Licensed/certificated airports - requires a real 4-letter ICAO code
+// (same bar for every region, so a UK/US pilot sees the same kind of thing
+// in the FROM/TO field either way).
+function buildAirports(lines, idx, countries) {
+  const ALLOWED_COUNTRIES = new Set(countries);
   const ALLOWED_TYPES = new Set(['small_airport', 'medium_airport', 'large_airport']);
 
   const results = [];
@@ -102,6 +115,39 @@ async function buildAirports() {
     });
   }
   results.sort((a, b) => a.icao.localeCompare(b.icao));
+  return results;
+}
+
+// US equivalent of the UK "unlicensed airfields" list (small_airport/
+// heliport entries with no real ICAO code) - there's no US body publishing
+// an aerosite CSV the way NATS does for the UK, but OurAirports itself
+// already carries these records (identified by their FAA `ident`/local
+// code, not a 4-letter ICAO) - same source already being fetched, just a
+// looser filter, rather than a whole new pipeline for one country.
+function buildUsAirfields(lines, idx) {
+  const results = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    const f = parseCsvLine(line);
+    if (f[idx['iso_country']] !== 'US') continue;
+    const type = f[idx['type']];
+    if (type !== 'small_airport' && type !== 'heliport') continue;
+    const icao = (f[idx['icao_code']] || '').trim();
+    if (icao.length === 4) continue; // already covered by buildAirports
+    const ident = (f[idx['ident']] || '').trim();
+    const name = (f[idx['name']] || '').trim();
+    if (!ident || !name) continue;
+    const lat = parseFloat(f[idx['latitude_deg']]);
+    const lon = parseFloat(f[idx['longitude_deg']]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    results.push({
+      kind: type === 'heliport' ? 'heliport' : 'airfield',
+      name: `${name} (${ident})`,
+      lat: Math.round(lat * 10000) / 10000,
+      lon: Math.round(lon * 10000) / 10000,
+    });
+  }
   return results;
 }
 
@@ -159,22 +205,38 @@ async function buildVrpsAndAirfields() {
 async function main() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 
-  const airports = await buildAirports();
-  const { vrps, airfields, vrpSourceUrl, aeroSourceUrl } = await buildVrpsAndAirfields();
+  const { lines, idx } = await fetchOurAirportsCsv();
+  const ukAirports = buildAirports(lines, idx, ['GB', 'IM', 'JE', 'GG']);
+  const usAirports = buildAirports(lines, idx, ['US']);
+  const usAirfields = buildUsAirfields(lines, idx);
+  const { vrps, airfields: ukAirfields, vrpSourceUrl, aeroSourceUrl } = await buildVrpsAndAirfields();
 
-  fs.writeFileSync(path.join(DATA_DIR, 'uk-airports.json'), JSON.stringify(airports));
+  fs.writeFileSync(path.join(DATA_DIR, 'uk-airports.json'), JSON.stringify(ukAirports));
   fs.writeFileSync(path.join(DATA_DIR, 'uk-vrps.json'), JSON.stringify(vrps));
-  fs.writeFileSync(path.join(DATA_DIR, 'uk-airfields.json'), JSON.stringify(airfields));
+  fs.writeFileSync(path.join(DATA_DIR, 'uk-airfields.json'), JSON.stringify(ukAirfields));
+  fs.writeFileSync(path.join(DATA_DIR, 'us-airports.json'), JSON.stringify(usAirports));
+  fs.writeFileSync(path.join(DATA_DIR, 'us-airfields.json'), JSON.stringify(usAirfields));
   fs.writeFileSync(
     path.join(DATA_DIR, 'meta.json'),
     JSON.stringify(
       {
         generatedAt: new Date().toISOString(),
-        counts: { airports: airports.length, vrps: vrps.length, airfields: airfields.length },
+        counts: {
+          ukAirports: ukAirports.length,
+          vrps: vrps.length,
+          ukAirfields: ukAirfields.length,
+          usAirports: usAirports.length,
+          usAirfields: usAirfields.length,
+        },
         sources: {
           airports: 'https://davidmegginson.github.io/ourairports-data/airports.csv',
           vrps: `https://nats-uk.ead-it.com${vrpSourceUrl}`,
-          airfields: `https://nats-uk.ead-it.com${aeroSourceUrl}`,
+          ukAirfields: `https://nats-uk.ead-it.com${aeroSourceUrl}`,
+          usAirfields: 'https://davidmegginson.github.io/ourairports-data/airports.csv',
+        },
+        notes: {
+          usVrps:
+            'No open US equivalent to NATS VRPs found - VFR reporting points are not published in a structured national dataset. US routes have no VRP suggestions in the app.',
         },
       },
       null,
@@ -183,7 +245,9 @@ async function main() {
   );
 
   fs.rmSync(TMP_DIR, { recursive: true, force: true });
-  console.log(`Airports: ${airports.length}, VRPs: ${vrps.length}, airfields: ${airfields.length}`);
+  console.log(
+    `UK airports: ${ukAirports.length}, VRPs: ${vrps.length}, UK airfields: ${ukAirfields.length}, US airports: ${usAirports.length}, US airfields: ${usAirfields.length}`,
+  );
 }
 
 main().catch((err) => {
