@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-09-04T20:23:15.739Z",
+  "generatedAt": "2026-09-07T07:40:15.731Z",
   "counts": {
     "ukAirports": 155,
     "vrps": 404,
     "ukAirfields": 448,
-    "usAirports": 1761,
+    "usAirports": 1762,
     "usAirfields": 22575
   },
   "sources": {
