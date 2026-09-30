@@ -477,6 +477,8 @@ AI_MAX_CALLS_PER_DAY = 80          # hard guard on spend (~2-3p per call)
 AI_USAGE_FILE = "ai_usage.json"
 AI_DEEP_MAX_PER_DAY = 8            # live web cross-checks (~10-20p each: up to 3 searches + reading results)
 AI_DEEP_SEARCHES = 3
+AI_DAILY_BUDGET_USD = 0.60         # hard daily $ cap for all AI checks (max ~$18/month); over it = plain pings
+AI_DEEP_RESERVE_USD = 0.20         # a web cross-check only starts if this much of today's budget is left
 AI_PRICE_SEARCH = 0.01             # $ per web search
 AI_PRICE_IN, AI_PRICE_OUT = 4.00, 20.00   # $ per million tokens (Opus 5.5)
 RECENT_VIP = []                    # (time, account, text) from the X watch, fed to the judge
@@ -610,8 +612,9 @@ def ai_judge(kind, m, extra, rc_notes, flags):
     client = _ai_client()
     if client is None:
         return None
-    if _ai_usage()["calls"] >= AI_MAX_CALLS_PER_DAY:
-        log("AI judge: daily cap reached - pinging without it")
+    today = _ai_usage()
+    if today["calls"] >= AI_MAX_CALLS_PER_DAY or today["usd"] >= AI_DAILY_BUDGET_USD:
+        log(f"AI judge: daily budget reached (${today['usd']:.2f}) - pinging without it")
         return None
     import anthropic
     req = dict(model=AI_MODEL, max_tokens=4000, system=JUDGE_SYSTEM,
@@ -667,7 +670,9 @@ def ai_deep_check(kind, m, extra, rc_notes, flags):
     """Second, slower opinion with live web search. Returns the parsed dict or None (then the quick verdict stands)."""
     import re
     client = _ai_client()
-    if client is None or _ai_usage().get("deep", 0) >= AI_DEEP_MAX_PER_DAY:
+    today = _ai_usage()
+    if (client is None or today.get("deep", 0) >= AI_DEEP_MAX_PER_DAY
+            or today["usd"] + AI_DEEP_RESERVE_USD > AI_DAILY_BUDGET_USD):
         return None
     msgs = [{"role": "user", "content": _coin_brief(kind, m, extra, rc_notes, flags)}]
     tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": AI_DEEP_SEARCHES}]
