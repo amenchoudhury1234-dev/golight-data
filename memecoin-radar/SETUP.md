@@ -54,7 +54,7 @@ You don't need to touch `keywords.txt`. It's only there if you ever want to forc
 X no longer lets anyone read posts for free, but its pay-per-use API is cheap: about $0.005 per post, and Elon's and Trump's original posts come to roughly $5–10 a month.
 1. Go to **console.x.com**, sign up for a developer account, create a project and an app, and add **$10 of credit**.
 2. Copy the app's **Bearer Token**, then paste it into a new file called **`x_token.txt`** in the radar folder. **Keep this file private.**
-3. Restart the radar. It will say "X watch on for: @elonmusk, @realDonaldTrump".
+3. Restart the radar. It will say "X watch on for: @elonmusk, @realDonaldTrump, @cz_binance, ...".
 
 What you'll then get, usually within about 60 seconds of a post:
 - **"@elonmusk POSTED A CONTRACT ADDRESS"** (urgent): he named a coin directly.

@@ -683,7 +683,15 @@ async def smart_wallets_loop(state):
 # ----------------------------- X / TWITTER VIP WATCH (Elon, Trump...) -----------------------------
 # Needs an X API bearer token (pay-per-use, ~$0.005 per post read; Elon+Trump originals ~ $5-10/month).
 # Put the token in x_token.txt next to this file. Without it, this detector is simply off.
-X_ACCOUNTS = ["elonmusk", "realDonaldTrump"]      # add e.g. "WhaleInsider", "WatcherGuru" (each ~ +$10-15/mo)
+X_ACCOUNTS = [
+    "elonmusk",          # biggest single memecoin catalyst (DOGE, JIMOTHY raccoon post)
+    "realDonaldTrump",   # mostly on Truth Social (read free); X covers the rest
+    "cz_binance",        # his dog/phrases spawn BSC & Solana coins; posts a few times a day (cheap)
+    "aeyakovenko",       # Toly, Solana co-founder - his memes move Solana coins
+    "a1lon9",            # Alon, pump.fun co-founder
+    "VladTenev",         # Robinhood CEO - following Super Inu's account was an early $SI signal
+]
+# Optional (busy news accounts, each roughly +$10-15/month): "WhaleInsider", "WatcherGuru", "blknoiz06"
 X_POLL_SECONDS = 60
 X_TOKEN_FILE = "x_token.txt"
 EMOJI_WORDS = {"🦝": "raccoon", "🐸": "frog", "🐕": "dog", "🐶": "dog", "🐈": "cat", "🐱": "cat", "🦛": "hippo",
