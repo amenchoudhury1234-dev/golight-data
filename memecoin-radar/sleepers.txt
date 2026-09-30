@@ -1,0 +1,6 @@
+# "Story coins" that can pump AGAIN when a VIP reposts their story (Solana contract addresses).
+# The radar checks these every minute and pings "SLEEPER WAKING" when volume suddenly jumps.
+Ge87EtsjwRQbHaqQmKRno69RFTwh9bfSsm99XNxTpump  # JIMOTHY - viral Seattle raccoon (Elon raccoon post: +331% Aug 8 2026)
+DEW9dSN6QpWyNthphCpMmAbZP1Q4cEKR9xQXAri98WDP  # Super Inu $SI - Trump "super intelligence"
+AyYNfPtftg2zDP4ZbgcoQMggQtwLh4zpfVVmUJs2thto  # TILCAYO - new cat species (Nat Geo)
+ADA9mtno4BVknoSefbqdh7aMPg4wwxZHKByRpJNTpump  # RIZZMAS v2 - Christmas seasonal

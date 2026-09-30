@@ -680,6 +680,43 @@ async def smart_wallets_loop(state):
         await asyncio.sleep(POLL_SECONDS)
 
 
+# ----------------------------- SLEEPERS (second-wave detector) -----------------------------
+# Coins tied to a famous animal/character/phrase often pump AGAIN when a VIP reposts the story, even without
+# naming the coin: JIMOTHY (viral raccoon) went $3.8M -> $16.2M (+331%) on Aug 8 2026 after Elon posted a
+# raccoon video; Super Inu went +130% on Sep 30 when Trump repeated "super intelligence". We watch these
+# known "story coins" every minute and ping the moment volume wakes up. Add CAs to sleepers.txt (one per line,
+# optional "# note").
+SLEEPER_FILE = "sleepers.txt"
+SLEEPER_MIN_H1_CHANGE = 20
+SLEEPER_VOL_MULTIPLE = 3.0      # last hour's volume vs the average hour of the last 24h
+
+
+def load_sleepers():
+    try:
+        with open(os.path.join(HERE, SLEEPER_FILE)) as f:
+            return [ln.split("#")[0].strip() for ln in f if ln.split("#")[0].strip()]
+    except FileNotFoundError:
+        return []
+
+
+async def sleepers_loop(state):
+    loop = asyncio.get_running_loop()
+    while True:
+        cas = load_sleepers()
+        if cas:
+            pairs = await loop.run_in_executor(None, dex_pairs_for_tokens, "solana", cas)
+            for p in pairs.values():
+                m = metrics(p)
+                avg_hour = m["vol_h24"] / 24 if m["vol_h24"] else 0
+                if (m["chg_h1"] >= SLEEPER_MIN_H1_CHANGE and avg_hour > 0
+                        and m["vol_h1"] >= SLEEPER_VOL_MULTIPLE * avg_hour
+                        and m["buys_h1"] >= m["sells_h1"] and m["mcap"] <= KEYWORD_MAX_MCAP):
+                    await loop.run_in_executor(None, alert, state, "SLEEPER WAKING", m,
+                                               f"Known story coin waking up: 1h volume is {m['vol_h1']/avg_hour:.1f}x its "
+                                               f"normal hour. Check X/news for a VIP repost (JIMOTHY/Elon pattern).")
+        await asyncio.sleep(POLL_SECONDS)
+
+
 async def main():
     state = State(os.path.join(HERE, STATE_FILE))
     log("Memecoin Radar starting - ALERTS ONLY. Phone topic: " + NTFY_TOPIC)
@@ -687,7 +724,7 @@ async def main():
         send_ntfy("Radar test", "Memecoin Radar is connected to your phone.", tags="white_check_mark")
         return
     await asyncio.gather(runners_loop(state), keywords_loop(state), graduations_loop(state),
-                         smart_wallets_loop(state))
+                         smart_wallets_loop(state), sleepers_loop(state))
 
 
 if __name__ == "__main__":

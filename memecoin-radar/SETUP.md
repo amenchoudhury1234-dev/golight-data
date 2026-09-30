@@ -50,6 +50,9 @@ You don't need to touch `keywords.txt`. It's only there if you ever want to forc
 - **Too few?** Lower them a bit.
 - The radar caps itself at 6 alerts an hour.
 
+## Sleeper coins (second waves)
+`sleepers.txt` lists "story coins" (Jimothy, Super Inu, Tilcayo, Rizzmas). These often pump **again** when a big account reposts their story without naming the coin. JIMOTHY did +331% after Elon posted a raccoon video. The radar checks them every minute and sends a **SLEEPER WAKING** ping when trading suddenly jumps. I'll add new story coins to the file as they appear.
+
 ## When it pings
 1. Open the DexScreener link in the notification.
 2. On GMGN, check that **global fees are at least 1.5 SOL** and that bundlers and snipers are low.
