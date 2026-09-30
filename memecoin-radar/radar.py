@@ -439,6 +439,10 @@ def check_links(m):
     return acts
 
 
+COPYCAT_MIN_MCAP = 500_000
+COPYCAT_MIN_VOL_H1 = 100_000
+
+
 def story_coin_symbols():
     """{TICKER: real contract} from sleepers.txt comments like '# Super Inu $SI - ...'."""
     out = {}
@@ -463,8 +467,12 @@ def story_coin_symbols():
 def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     real = story_coin_symbols().get(m["symbol"].lstrip("$").upper())
     if real and real != m["addr"]:
-        log(f"skipped copycat ${m['symbol']} ({m['addr'][:6]}...) - the real story coin is {real[:6]}...")
-        return
+        # 30 Sep: the $24K "$SI" copy died (0.16x) but the $1.01M one did 7.2x - big copies have real traction
+        if m["mcap"] < COPYCAT_MIN_MCAP or m["vol_h1"] < COPYCAT_MIN_VOL_H1:
+            log(f"skipped copycat ${m['symbol']} ({m['addr'][:6]}...) - the real story coin is {real[:6]}...")
+            return
+        extra = (f"COPYCAT WARNING: not the original ${m['symbol']} ({real[:6]}...), but it has real money "
+                 f"behind it. Double-check the CA.\n" + extra)
     if NARRATIVE_MODE and kind in MOMENTUM_KINDS and not (flags or {}).get("story"):
         log_candidate(kind, m, False, ["silent (momentum only)"], flags)   # paper-traded, no phone ping
         return
@@ -515,7 +523,8 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
         f"5m {m['chg_m5']:+.0f}% | 1h {m['chg_h1']:+.0f}% | buys/sells 1h {m['buys_h1']}/{m['sells_h1']} | age {m['age_h']:.1f}h\n"
         f"{rc_notes}\n{extra}\n"
         f"BEFORE BUYING: tap GMGN - global fees >=1.5 SOL, bundlers/snipers low. Paste CA into Coinbase.\n"
-        f"PLAN: max GBP50-100, sell half at 2x, hard stop -30%. Add it to positions.txt for exit alerts."
+        f"PLAN (lotto): only GBP20-50 you can lose completely - no stop, most winners dip 50-80% first. "
+        f"Sell half at 2x. Add it to positions.txt for exit alerts."
     )
     if send_ntfy(title, body, click=m["url"] or None, priority="urgent" if strong else "high",
                  tags="rotating_light,moneybag" if strong else "rotating_light", actions=check_links(m)):
@@ -980,7 +989,7 @@ X_ACCOUNTS = [
     "elonmusk",          # biggest single memecoin catalyst (DOGE, JIMOTHY raccoon post)
     "realDonaldTrump",   # mostly on Truth Social (read free); X covers the rest
     "cz_binance",        # his dog/phrases spawn BSC & Solana coins; posts a few times a day (cheap)
-    "aeyakovenko",       # Toly, Solana co-founder - his memes move Solana coins
+    "toly",              # Toly (Anatoly Yakovenko), Solana co-founder - his memes move Solana coins
     "a1lon9",            # Alon, pump.fun co-founder
     "VladTenev",         # Robinhood CEO - following Super Inu's account was an early $SI signal
 ]
@@ -1135,7 +1144,7 @@ OUTCOME_CHECK_MINUTES = 10
 PAPER_STAKE_GBP = 50
 SHADOW_REPEAT_HOURS = 6
 STRATEGIES = {
-    "rules": {"stop": 0.70, "half_at": 2.0, "trail": 0.40, "label": "Current rules (half at 2x, stop -30%)"},
+    "rules": {"stop": 0.70, "half_at": 2.0, "trail": 0.40, "label": "Stop rules (half at 2x, stop -30%)"},
     "wide": {"stop": 0.50, "half_at": 2.0, "trail": 0.40, "label": "Wider stop (-50%)"},
     "quick": {"stop": 0.70, "all_at": 2.0, "label": "Sell everything at 2x"},
     "lotto": {"stop": 0.0, "half_at": 2.0, "trail": 0.50, "label": "Lotto (no stop, half at 2x, trail 50%)"},
@@ -1366,10 +1375,15 @@ async def scorecard_loop(state):
 # ----------------------------- POSITION EXIT ALERTS -----------------------------
 # Exits are where money is made or lost (HOLDOWEEN, GOCARDS, CROOK). List what you hold in positions.txt as
 # "<contract address> <average cost in $>" (Coinbase shows "Average cost"). Checked every 30s:
-# 2x -> sell half | 3x -> sell another quarter | -30% before 2x -> stop | -40% from peak after 2x -> trail | 5-min dump.
+# 2x -> sell half | 3x -> sell another quarter | trail 50% off the peak after 2x | optional hard stop | 5-min dump.
 POSITIONS_FILE = "positions.txt"
 POS_STATE_FILE = "positions_state.json"
 POS_POLL_SECONDS = 30
+# 30 Sep ping review (9 coins): a -30% stop lost on 8 of 9 - even the winners (CROOK 7x, SI 7.2x, terrafying 3.3x)
+# fell 20-82% first. "Lotto" exits (no stop, half at 2x, trail 50%) were +GBP79 vs -GBP52 for the stop rules.
+# So by default there is no stop: the SIZE is your stop (only put in what you can lose completely).
+POS_HARD_STOP = None         # e.g. 0.70 to bring back a -30% stop alert
+POS_TRAIL = 0.50             # after selling half at 2x, sell the rest when it's this far off its peak
 
 
 def load_positions():
@@ -1428,14 +1442,14 @@ async def positions_loop(state):
                     status = f"${sym} is {x:.2f}x your cost | MCap {fmt_usd(m['mcap'])} | 5m {m['chg_m5']:+.0f}%"
                     if x >= 2:
                         fire("2x", f"TAKE PROFIT: ${sym} hit 2x - sell HALF now",
-                             status + "\nSell half now = your whole stake back. The rest rides with a 40% trailing stop.")
+                             status + f"\nSell half now = your whole stake back. The rest rides until it's {POS_TRAIL:.0%} off its peak.")
                     if x >= 3:
                         fire("3x", f"${sym} hit 3x - sell another quarter", status)
-                    if x <= 0.70 and "2x" not in s["done"]:
+                    if POS_HARD_STOP and x <= POS_HARD_STOP and "2x" not in s["done"]:
                         fire("stop", f"STOP: ${sym} is -{(1 - x) * 100:.0f}% - sell now",
-                             status + "\nHard stop -30% reached. Sell and move on - no hoping.")
-                    if "2x" in s["done"] and x <= s["peak"] * 0.6:
-                        fire("trail", f"TRAILING STOP: ${sym} is 40% off its peak - sell the rest", status)
+                             status + "\nHard stop reached. Sell and move on - no hoping.")
+                    if "2x" in s["done"] and x <= s["peak"] * (1 - POS_TRAIL):
+                        fire("trail", f"TRAILING STOP: ${sym} is {POS_TRAIL:.0%} off its peak - sell the rest", status)
                     if dumping_now(m) and time.time() - s.get("dump_t", 0) > 600:
                         s["dump_t"] = time.time()
                         changed = True
@@ -1619,7 +1633,7 @@ async def ignition_loop(state):
                         surge = round(vol_surge(m), 1)
                         extra = (f"IGNITION: 5-min volume {surge}x its pace earlier this hour, "
                                  f"{m['buys_m5']}/{m['sells_m5']} buys/sells in 5 min, price at a new high. "
-                                 f"This is the START of a move - most ignitions fizzle. Lottery size, stop -30%.")
+                                 f"This is the START of a move - most ignitions fizzle. Lottery size only.")
                         story = real_world_match(m)
                         if story:
                             extra = f'REAL-WORLD STORY: matches trending "{story}".\n' + extra

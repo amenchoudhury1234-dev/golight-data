@@ -54,7 +54,7 @@ You don't need to touch `keywords.txt`. It's only there if you ever want to forc
 X no longer lets anyone read posts for free, but its pay-per-use API is cheap: about $0.005 per post, and Elon's and Trump's original posts come to roughly $5–10 a month.
 1. Go to **console.x.com**, sign up for a developer account, create a project and an app, and add **$10 of credit**.
 2. Copy the app's **Bearer Token**, then paste it into a new file called **`x_token.txt`** in the radar folder. **Keep this file private.**
-3. Restart the radar. It will say "X watch on for: @elonmusk, @realDonaldTrump, @cz_binance, ...".
+3. Restart the radar. It will say "X watch on for: @elonmusk, @realDonaldTrump, @cz_binance, @toly, ...".
 
 What you'll then get, usually within about 60 seconds of a post:
 - **"@elonmusk POSTED A CONTRACT ADDRESS"** (urgent): he named a coin directly.
@@ -79,7 +79,7 @@ It also tracks **near-misses the filters rejected**, so we can see what the filt
 You can check it any time with `python radar.py --scorecard`. Run `python radar.py --export` to write `pings_export.csv` for a deeper analysis. Send both to Claude.
 
 ## Exit alerts for coins you hold (positions.txt)
-When you buy something, add a line to `positions.txt`: `<contract address> <average cost in $>` (copy "Average cost" from Coinbase). The radar checks every 30 seconds and sends an **urgent** ping to: sell half at 2x, sell a quarter at 3x, **STOP at −30%**, sell the rest at 40% off the peak, plus a **DUMP WARNING** when sellers flood in. Delete the line when you've sold.
+When you buy something, add a line to `positions.txt`: `<contract address> <average cost in $>` (copy "Average cost" from Coinbase). The radar checks every 30 seconds and sends an **urgent** ping to: sell half at 2x, sell a quarter at 3x, and sell the rest at 50% off the peak. There is no stop by default (set `POS_HARD_STOP = 0.70` in radar.py if you want one), plus a **DUMP WARNING** when sellers flood in. Delete the line when you've sold.
 
 ## Narrative mode (on by default)
 On 30 Sep, every price-only ping we could check fell 30% before reaching 2x, and most peaked within 3 minutes of the ping. So your phone now pings **only when there is a story**:
@@ -108,6 +108,6 @@ Coins that are down on the hour (dead-cat bounces) no longer ping as runners or 
 1. Open the DexScreener link in the notification.
 2. On GMGN, check that **global fees are at least 1.5 SOL** and that bundlers and snipers are low.
 3. Paste the contract address (CA) into the Coinbase app search.
-4. **Rules:** GBP 50–100 max, sell half at 2x, hard stop at −30%.
+4. **Rules (lotto style, from the 30 Sep review):** only £20–50 you can afford to lose completely. **No stop**: even the winners (CROOK 7x, SI 7.2x) fell 50–80% first, and a −30% stop lost on 8 of 9 coins. Sell half at 2x, then sell the rest once it's 50% off its peak.
 
 Most pinged coins still die. The radar gets you in early; the rules protect you when it's wrong.
