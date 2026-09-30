@@ -40,6 +40,8 @@ RUNNER_MIN_M5_CHANGE = 20         # ... or % rise in the last 5 minutes
 RUNNER_MIN_H1_VOLUME = 20_000     # $ traded in the last hour
 RUNNER_MIN_H1_BUYS = 100          # real crowd, not 5 wallets
 RUNNER_MIN_LIQUIDITY = 8_000      # $ in the pool
+RUNNER_MIN_AGE_MINUTES = 20       # snipers dump ~85% within 5 min of launch - let that pass
+RUNNER_MIN_M5_CHANGE_ALLOWED = -10  # skip coins falling hard in the last 5 minutes
 
 # Graduation rules (pump.fun coins that just migrated)
 GRAD_RECHECK_MINUTES = 10         # wait, then check it's holding
@@ -216,6 +218,8 @@ def is_early_runner(m):
         and m["buys_h1"] >= RUNNER_MIN_H1_BUYS
         and m["buys_h1"] >= m["sells_h1"]
         and m["liq"] >= RUNNER_MIN_LIQUIDITY
+        and m["age_h"] * 60 >= RUNNER_MIN_AGE_MINUTES
+        and m["chg_m5"] >= RUNNER_MIN_M5_CHANGE_ALLOWED
     )
 
 
@@ -223,6 +227,9 @@ def is_keyword_mover(m):
     return (
         m["chain"] in CHAINS
         and m["mcap"] <= KEYWORD_MAX_MCAP
+        and m["mcap"] >= RUNNER_MIN_MCAP
+        and m["liq"] >= RUNNER_MIN_LIQUIDITY
+        and m["chg_m5"] >= RUNNER_MIN_M5_CHANGE_ALLOWED
         and m["vol_h1"] >= KEYWORD_MIN_H1_VOLUME
         and m["chg_h1"] >= KEYWORD_MIN_H1_CHANGE
         and m["buys_h1"] >= m["sells_h1"]
@@ -261,7 +268,7 @@ def alert(state, kind, m, extra=""):
         state.save()
         return
     # Strong setup = big move on heavy volume with buyers clearly outnumbering sellers -> urgent "act now" ping
-    strong = (m["chg_h1"] >= 100 and m["buys_h1"] >= 1.5 * max(m["sells_h1"], 1)
+    strong = (m["chg_h1"] >= 100 and m["chg_m5"] >= 0 and m["buys_h1"] >= 1.5 * max(m["sells_h1"], 1)
               and m["vol_h1"] >= 50_000 and m["mcap"] <= 1_000_000)
     if strong:
         title = f"ACT NOW (10-min window): ${m['symbol']} {fmt_usd(m['mcap'])} {m['chg_h1']:+.0f}% 1h"
@@ -452,9 +459,6 @@ def coin_matches(phrase, m):
     ac = acronym(phrase)
     if ac and len(ac) >= 2 and sym == ac:              # "super intelligence" -> $SI
         return True
-    first = phrase.split()[0].lower() if phrase.split() else ""
-    if len(first) >= 4 and name.startswith(first) and any(x in name for x in ("inu", "coin", "cat", "dog")):
-        return True                                   # "super ..." -> "Super Inu"
     return False
 
 
