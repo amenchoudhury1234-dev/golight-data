@@ -66,7 +66,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def log(msg):
-    print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+    line = f"[{datetime.now():%H:%M:%S}] {msg}"
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        print(line.encode("ascii", "replace").decode(), flush=True)
 
 
 def http_json(url, timeout=15):
@@ -339,18 +343,24 @@ def is_keyword_mover(m):
 
 # ----------------------------- alerting -----------------------------
 def send_ntfy(title, body, click=None, priority="high", tags="rotating_light"):
-    headers = {"Title": title[:120], "Priority": priority, "Tags": tags}
+    """Publish via ntfy's JSON API so emoji / non-Latin coin names work (HTTP headers can't carry them)."""
+    prio = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5}.get(priority, 4)
+    payload = {"topic": NTFY_TOPIC, "title": title[:120], "message": body[:3900], "priority": prio,
+               "tags": [t for t in tags.split(",") if t]}
     if click:
-        headers["Click"] = click
-    req = urllib.request.Request(f"https://ntfy.sh/{NTFY_TOPIC}", data=body.encode("utf-8"),
-                                 headers=headers, method="POST")
+        payload["click"] = click
+    req = urllib.request.Request("https://ntfy.sh/", data=json.dumps(payload).encode("utf-8"),
+                                 headers={"Content-Type": "application/json", **UA}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             ok = r.status == 200
     except Exception as e:
         log(f"ntfy FAILED: {e}")
         return False
-    log(f"ntfy sent: {title}")
+    try:
+        log(f"ntfy sent: {title}")
+    except UnicodeEncodeError:   # Windows consoles can't always print emoji
+        log("ntfy sent: " + title.encode("ascii", "replace").decode())
     return ok
 
 
@@ -521,7 +531,8 @@ def harvest_wikipedia_spikes():
         arts = http_json(url)["items"][0]["articles"]
         return [a["article"] for a in arts[:200]]
     try:
-        d1 = datetime.utcnow() - timedelta(days=1)
+        from datetime import timezone
+        d1 = datetime.now(timezone.utc) - timedelta(days=1)
         y, before = top(d1), set(top(d1 - timedelta(days=1)))
         out = set()
         for a in y[:120]:
