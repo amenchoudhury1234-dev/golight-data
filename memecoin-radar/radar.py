@@ -701,6 +701,7 @@ def x_get(path, token):
 
 def vip_phrases(text):
     import re
+    text = re.sub(r"https?://\S+", " ", text)   # drop links
     phrases = set(extract_phrases(text))
     for emo, word in EMOJI_WORDS.items():
         if emo in text:
