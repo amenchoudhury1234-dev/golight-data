@@ -1110,9 +1110,47 @@ def harvest_polymarket_mentions():
 
 AUTO = None  # shared AutoKeywords instance (runners loop uses it to tag real-world-backed coins)
 
+# ----------------------------- LAUNCH CLUSTERS (a story before it's in the news) -----------------------------
+# People who just saw a viral clip launch coins named after it within minutes - usually hours before news sites
+# write about it. 3+ DIFFERENT creators using the same new word inside 15 min = a launch cluster (weak source).
+LAUNCH_CLUSTER_MIN_CREATORS = 3
+LAUNCH_CLUSTER_MINUTES = 15
+LAUNCH_FILLER = set("""coin token inu pepe doge dogs cats kitty puppy meme memes official based chad moon moons
+baby mini mega super ultra king queen lord little shib floki bonk bull bear frog solana pump fun sol trump elon
+musk donald president america world money cash rich gold life love happy wife time first real pump launch
+community today season world""".split())
+_LAUNCH_WORDS = {}   # word -> {creator: time}
+_CLUSTER_LOGGED = {}  # word -> time last logged
+
+
+def launch_cluster_note(name, symbol, creator):
+    import re
+    now = time.time()
+    cutoff = now - LAUNCH_CLUSTER_MINUTES * 60
+    words = {w for w in re.findall(r"[a-z]{5,}", f"{name or ''} {symbol or ''}".lower())
+             if w not in LAUNCH_FILLER and w not in STOP}
+    for w in words:
+        seen = {c: t for c, t in _LAUNCH_WORDS.get(w, {}).items() if t >= cutoff}
+        seen[creator] = now
+        _LAUNCH_WORDS[w] = seen
+        if len(seen) >= LAUNCH_CLUSTER_MIN_CREATORS and AUTO is not None:
+            AUTO.add(w, "launch-cluster", now)
+            AUTO.seen[w] = max(AUTO.seen.get(w, 0), now)   # newest phrases are searched first
+            if now - _CLUSTER_LOGGED.get(w, 0) > 30 * 60:
+                _CLUSTER_LOGGED[w] = now
+                others = sorted(set(AUTO.sources(w)) - {"launch-cluster"})
+                log(f'launch cluster: "{w}" - {len(seen)} creators launched coins with it in {LAUNCH_CLUSTER_MINUTES} min'
+                    + (f" | also in: {', '.join(others)} (cross-referenced)" if others else " | no other source yet"))
+    if len(_LAUNCH_WORDS) > 5000:                       # forget words nobody has used for a while
+        for w in [w for w, s in _LAUNCH_WORDS.items() if max(s.values()) < cutoff]:
+            _LAUNCH_WORDS.pop(w, None)
+
 
 STRONG_SOURCES = {"trump", "ai-routine", "polymarket", "x-vip", "x-news", "manual", "news-multi"}
-WEAK_SOURCES = {"reddit", "google", "wikipedia", "news"}   # need a second, independent source before they count
+# need a second, independent source before they count. "launch-cluster" = several different people launching
+# pump.fun coins with the same new word within minutes: the earliest trace of a story that's still spreading on
+# TikTok/X (which the radar can't read). A cluster + Reddit/Google/Wikipedia/one news outlet = cross-referenced.
+WEAK_SOURCES = {"reddit", "google", "wikipedia", "news", "launch-cluster"}
 
 
 class AutoKeywords:
@@ -1245,6 +1283,7 @@ async def graduations_loop(state):
                         continue
                     if msg.get("txType") == "create":     # brand-new pump.fun launch
                         nursery_add(mint)
+                        launch_cluster_note(msg.get("name"), msg.get("symbol"), msg.get("traderPublicKey") or mint)
                         for a in [a for a, v in STORY_LAUNCHES.items() if time.time() - v[0] > 3600]:
                             STORY_LAUNCHES.pop(a, None)
                         hit = story_launch_match(msg.get("name"), msg.get("symbol"))
