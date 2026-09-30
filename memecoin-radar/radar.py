@@ -775,7 +775,10 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     if not verified:
         extra = "SAFETY UNVERIFIED - check GMGN (bundlers/insiders/top10) before anything.\n" + extra
     verdict = ai_judge("ACT NOW" if strong else kind, m, extra, rc_notes, flags)
-    if verdict and verdict["verdict"] == "PING" and (phrase or kind in ("SLEEPER WAKING", "SMART MONEY", "NEWS MENTION")):
+    # A fresh Elon/Trump/VIP post IS the cross-check - skip the slow web search (up to ~60s) so the ping is fast.
+    vip_fresh = "x-vip" in srcs or str((flags or {}).get("launch_src", "")).startswith("@")
+    if (verdict and verdict["verdict"] == "PING" and not vip_fresh
+            and (phrase or kind in ("SLEEPER WAKING", "SMART MONEY", "NEWS MENTION"))):
         deep = ai_deep_check(kind, m, extra, rc_notes, flags)
         if deep:
             verdict = dict(deep, deep=True)
@@ -1454,6 +1457,10 @@ X_ACCOUNTS += X_FEED_ACCOUNTS
 FEED_TICKER_IGNORE = {"BTC", "ETH", "SOL", "XRP", "BNB", "USDT", "USDC", "DOGE", "ADA", "TRX", "SUI", "TON",
                       "AVAX", "LINK", "DOT", "LTC", "SHIB", "PEPE", "HYPE", "TRUMP", "MSTR", "COIN", "TSLA", "NVDA"}
 X_POLL_SECONDS = 60
+# The accounts whose single post can start a run are checked every 15s (empty checks aren't billed by X - only
+# posts returned are). On an X "429 Too Many Requests" that account's interval doubles (max 2 min), then recovers.
+X_FAST_ACCOUNTS = {"elonmusk", "realDonaldTrump", "cz_binance"}
+X_FAST_POLL_SECONDS = 15
 # Words these accounts post about every day - a coin named after them doesn't get a surprise wave of buyers.
 # 30 Sep: Elon's "Starship Flight 14" post matched a $43K STARSHIP coin that didn't move at all.
 VIP_ROUTINE_WORDS = {
@@ -1564,6 +1571,7 @@ async def x_vip_loop(state):
         pass
     hb = {"t": time.time(), "polls": 0, "posts": 0, "errors": 0, "last_err": "", "last_post": time.time(),
           "warned": False}
+    poll_iv, next_due = {}, {}                           # per-account check interval and next check time
     while True:
         if time.time() - hb["t"] >= 30 * 60:        # heartbeat every 30 min so you can see it's alive
             log(f"X watch alive: {hb['polls']} polls, {hb['posts']} new posts, {hb['errors']} errors in 30 min"
@@ -1575,14 +1583,25 @@ async def x_vip_loop(state):
                       "Check console.x.com credit/usage and the radar log for 'X error'.", priority="default",
                       tags="warning")
         for name, uid in ids.items():
+            base_iv = X_FAST_POLL_SECONDS if name in X_FAST_ACCOUNTS else X_POLL_SECONDS
+            iv = poll_iv.setdefault(name, base_iv)
+            if time.time() < next_due.get(name, 0):
+                continue
+            next_due[name] = time.time() + iv
             q = "exclude=replies,retweets&tweet.fields=created_at&max_results=5"
             if since.get(name):
                 q += f"&since_id={since[name]}"
             hb["polls"] += 1
             try:
                 res = await loop.run_in_executor(None, x_get, f"users/{uid}/tweets?{q}", token)
+                poll_iv[name] = base_iv
             except Exception as e:
-                log(f"X error @{name}: {e}")
+                if "429" in str(e):
+                    poll_iv[name] = min(iv * 2, 120)
+                    next_due[name] = time.time() + poll_iv[name]
+                    log(f"X rate limit @{name}: checking every {poll_iv[name]}s for now")
+                else:
+                    log(f"X error @{name}: {e}")
                 hb["errors"] += 1
                 hb["last_err"] = str(e)
                 continue
@@ -1627,14 +1646,16 @@ async def x_vip_loop(state):
                         AUTO.seen[ph] = now      # newest = searched first, every 3 minutes
                 matches = []
                 routine = VIP_ROUTINE_WORDS.get(name, set())
-                for ph in [p for p in phrases if not set(p.split()) <= routine][:6]:
-                    for p in await loop.run_in_executor(None, dex_search, ph):
+                search = [p for p in phrases if not set(p.split()) <= routine][:6]
+                # all phrase searches at once (was one per second): the phone buzzes ~5s sooner after a VIP post
+                results = await asyncio.gather(*(loop.run_in_executor(None, dex_search, ph) for ph in search))
+                for ph, pairs in zip(search, results):
+                    for p in pairs:
                         m = metrics(p)
                         if (m["chain"] in CHAINS and m["addr"] and coin_matches(ph, m)
                                 and m["liq"] >= 20_000 and m["mcap"] <= KEYWORD_MAX_MCAP
                                 and m["vol_h24"] >= VIP_MATCH_MIN_VOL_H24):
                             matches.append((ph, m))
-                    await asyncio.sleep(1)
                 best = {}
                 for ph, m in matches:
                     if m["addr"] not in best or m["vol_h24"] > best[m["addr"]][1]["vol_h24"]:
@@ -1648,9 +1669,10 @@ async def x_vip_loop(state):
                               f"{lines}\n\nThese haven't necessarily moved yet - this is the EARLIEST possible heads-up "
                               "(JIMOTHY did +331% after Elon's raccoon post). Only buy if volume starts jumping in the next "
                               "few minutes - no buyers = no move. Check GMGN, GBP20-50 max, half out at 2x.",
-                              click=top[0][1]["url"] or None, priority="high", tags="bird")
-            await asyncio.sleep(1)
-        await asyncio.sleep(X_POLL_SECONDS)
+                              click=top[0][1]["url"] or None, priority="urgent" if name in X_FAST_ACCOUNTS else "high",
+                              tags="bird", actions=check_links(top[0][1]))
+            await asyncio.sleep(0.2)
+        await asyncio.sleep(1)
 
 
 # ----------------------------- SLEEPERS (second-wave detector) -----------------------------
