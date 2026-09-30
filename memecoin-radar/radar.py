@@ -855,6 +855,23 @@ def harvest_google_trends():
     return phrases
 
 
+REDDIT_FEEDS = ["https://www.reddit.com/r/all/top/.rss?t=hour", "https://www.reddit.com/r/aww/top/.rss?t=day",
+                "https://www.reddit.com/r/nextfuckinglevel/top/.rss?t=day"]
+
+
+def harvest_reddit():
+    """Viral posts (animals, clips, memes) often become coins hours later - Jimothy the raccoon was a viral clip."""
+    import re
+    phrases = set()
+    for url in REDDIT_FEEDS:
+        try:
+            for t in fetch_rss_titles(url, 15):
+                phrases |= extract_phrases(re.sub(r"<[^>]+>", " ", t)[:300])
+        except Exception as e:
+            log(f"reddit feed unavailable ({url.split('/r/')[1].split('/')[0]}): {e}")
+    return phrases
+
+
 def harvest_wikipedia_spikes():
     """Pages that jumped into yesterday's top views vs the day before (new animals, people, events)."""
     from datetime import timedelta
@@ -962,6 +979,7 @@ class AutoKeywords:
         found |= harvest_google_trends()
         found |= harvest_wikipedia_spikes()
         found |= harvest_polymarket_mentions()
+        found |= harvest_reddit()
         now = time.time()
         for ph in found:
             self.seen.setdefault(ph, now)
@@ -1175,7 +1193,13 @@ X_ACCOUNTS = [
     "a1lon9",            # Alon, pump.fun co-founder
     "VladTenev",         # Robinhood CEO - following Super Inu's account was an early $SI signal
 ]
-# Optional (busy news accounts, each roughly +$10-15/month): "WhaleInsider", "WatcherGuru", "blknoiz06"
+# News aggregators: they break story-coin news first ("JUST IN: Vlad Tenev follows Super Inu $SI" came from
+# WhaleInsider hours before the big run). They post a lot (~$5-10/month each), so their posts only ping when they
+# name a $TICKER that's a live Solana/Base coin; their headlines also go to the AI judge as context.
+X_FEED_ACCOUNTS = ["WhaleInsider", "WatcherGuru"]
+X_ACCOUNTS += X_FEED_ACCOUNTS
+FEED_TICKER_IGNORE = {"BTC", "ETH", "SOL", "XRP", "BNB", "USDT", "USDC", "DOGE", "ADA", "TRX", "SUI", "TON",
+                      "AVAX", "LINK", "DOT", "LTC", "SHIB", "PEPE", "HYPE", "TRUMP", "MSTR", "COIN", "TSLA", "NVDA"}
 X_POLL_SECONDS = 60
 # Words these accounts post about every day - a coin named after them doesn't get a surprise wave of buyers.
 # 30 Sep: Elon's "Starship Flight 14" post matched a $43K STARSHIP coin that didn't move at all.
@@ -1214,6 +1238,30 @@ def vip_phrases(text):
     if len(words) <= 5:
         phrases.update(words)
     return {p for p in phrases if 2 <= len(p) <= 40}
+
+
+async def feed_post_tickers(state, acct, text):
+    """A news account named a $TICKER: find the live Solana/Base coin with that exact ticker and send it to the
+    normal alert path (safety check + AI judge)."""
+    import re
+    loop = asyncio.get_running_loop()
+    for tick in dict.fromkeys(t.upper() for t in re.findall(r"\$([A-Za-z][A-Za-z0-9]{1,11})\b", text)):
+        if tick in FEED_TICKER_IGNORE:
+            continue
+        best = None
+        for p in await loop.run_in_executor(None, dex_search, tick):
+            m = metrics(p)
+            if (m["chain"] in CHAINS and m["symbol"].replace("$", "").upper() == tick and m["liq"] >= 20_000
+                    and RUNNER_MIN_MCAP <= m["mcap"] <= KEYWORD_MAX_MCAP and m["vol_h24"] >= VIP_MATCH_MIN_VOL_H24
+                    and (best is None or m["vol_h24"] > best["vol_h24"])):
+                best = m
+        if best:
+            await loop.run_in_executor(None, lambda: alert(
+                state, "NEWS MENTION", best,
+                f'@{acct} just posted about ${tick}: "{text[:220]}". News accounts naming a coin is how Super Inu '
+                f'started its run. Check it is the right CA (highest volume shown).',
+                flags={"story": f"@{acct} ${tick}"}))
+        await asyncio.sleep(1)
 
 
 async def x_vip_loop(state):
@@ -1259,6 +1307,9 @@ async def x_vip_loop(state):
                     send_ntfy(f"@{name} POSTED A CONTRACT ADDRESS", f"{text[:300]}\n\nCA: {ca}\n"
                               "Copycats appear within seconds - use ONLY this exact CA. Check GMGN first.",
                               click=f"https://dexscreener.com/solana/{ca}", priority="urgent", tags="rotating_light")
+                if name in X_FEED_ACCOUNTS:
+                    await feed_post_tickers(state, name, text)
+                    continue
                 # 2) memeable phrases -> feed the keyword engine + ping existing matching coins BEFORE they move
                 phrases = vip_phrases(text)
                 if AUTO is not None:
@@ -1304,12 +1355,34 @@ SLEEPER_MIN_H1_CHANGE = 20
 SLEEPER_VOL_MULTIPLE = 3.0      # last hour's volume vs the average hour of the last 24h
 
 
+AUTO_SLEEPER_FILE = "auto_sleepers.txt"   # written by the radar: story coins that already did 3x+
+AUTO_SLEEPER_MIN_X = 3.0
+
+
 def load_sleepers():
+    out = []
+    for fn in (SLEEPER_FILE, AUTO_SLEEPER_FILE):
+        try:
+            with open(os.path.join(HERE, fn), encoding="utf-8") as f:
+                out += [ln.split("#")[0].strip() for ln in f if ln.split("#")[0].strip()]
+        except FileNotFoundError:
+            pass
+    return list(dict.fromkeys(out))
+
+
+def add_auto_sleepers(entries):
+    """entries: [(addr, note)]. Jimothy and Super Inu both had big SECOND waves days after the first run."""
+    have = set(load_sleepers())
+    new = [(a, n) for a, n in entries if a not in have]
+    if not new:
+        return
     try:
-        with open(os.path.join(HERE, SLEEPER_FILE)) as f:
-            return [ln.split("#")[0].strip() for ln in f if ln.split("#")[0].strip()]
-    except FileNotFoundError:
-        return []
+        with open(os.path.join(HERE, AUTO_SLEEPER_FILE), "a", encoding="utf-8") as f:
+            for a, n in new:
+                f.write(f"{a}  # {n}\n")
+        log(f"auto-sleepers: now watching {', '.join(n.split(' ')[0] for _, n in new)} for a second wave")
+    except Exception as e:
+        log(f"could not write auto-sleepers: {e}")
 
 
 async def sleepers_loop(state):
@@ -1434,6 +1507,7 @@ def log_ping(kind, m, flags=None):
 def update_prices(prices):
     """prices: {addr: (price_usd, liquidity_usd)}. Advances every open (<24h) logged coin's paper trades."""
     now = time.time()
+    new_sleepers = []
     with PINGS_LOCK:
         pings = _load_pings()
         changed = False
@@ -1453,6 +1527,11 @@ def update_prices(prices):
                 for k, cfg in STRATEGIES.items():
                     if k in sim:
                         _sim_step(sim[k], x, cfg)
+                if (p["peak_x"] >= AUTO_SLEEPER_MIN_X and p.get("chain") == "solana" and not p.get("sleeper")
+                        and ((p.get("f") or {}).get("story") or (p.get("f") or {}).get("keyword"))):
+                    p["sleeper"] = True
+                    new_sleepers.append((p["addr"], f"${p['symbol']} auto: {p['kind']} did {p['peak_x']:.1f}x "
+                                                    f"({datetime.now():%d %b})"))
                 for key, secs in (("x_1h", 3600), ("x_6h", 6 * 3600), ("x_24h", 24 * 3600)):
                     if p.get(key) is None and age >= secs:
                         p[key] = round(x, 3)
@@ -1466,6 +1545,7 @@ def update_prices(prices):
                 changed = True
         if changed:
             _save_pings(pings)
+    add_auto_sleepers(new_sleepers)
 
 
 def _prices_from_pairs(pairs):
@@ -1743,7 +1823,7 @@ def story_launch_match(name, symbol):
     lite = {"name": name or "", "symbol": symbol or ""}
     now = time.time()
     for t, acct, text in reversed(RECENT_VIP):
-        if now - t <= STORY_LAUNCH_VIP_HOURS * 3600:
+        if now - t <= STORY_LAUNCH_VIP_HOURS * 3600 and acct not in X_FEED_ACCOUNTS:
             for ph in vip_phrases(text):
                 if len(ph) >= 4 and _launch_matches(ph, lite):
                     return ph, f"@{acct} post {(now - t) / 60:.0f} min ago"

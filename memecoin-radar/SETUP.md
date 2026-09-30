@@ -94,6 +94,11 @@ Price-only coins are still tracked silently on paper and shown in the 21:00 scor
 ## STORY LAUNCH pings (earliest entry on a story coin)
 Every new pump.fun coin is checked the moment it's created. If its name or ticker matches something Elon, Trump or another watched account posted in the last 2 hours (or a live trending phrase), the radar watches it at 3, 8, 15 and 30 minutes. It pings only if the coin is getting real buyers **and** is leading the copycats on volume. This is where 10–100x entries come from ($10–50K market cap), but it's also the riskiest ping, so lottery size only.
 
+## More sources (added 30 Sep)
+- **@WhaleInsider and @WatcherGuru on X:** news accounts that often report story coins first ("Vlad Tenev follows Super Inu $SI" came from WhaleInsider hours before the big run). They only ping when they name a **$TICKER** that's a live Solana/Base coin (**NEWS MENTION**), and it still goes through the safety check and the AI check. Cost: roughly $5–10 a month each in X credit.
+- **Reddit:** the hottest posts on r/all, r/aww and r/nextfuckinglevel feed the phrase list, because viral animals and clips often become coins hours later.
+- **Automatic second-wave watch:** any story coin that does 3x+ is added to `auto_sleepers.txt` and watched like Jimothy for a second wave. Delete a line to stop watching it.
+
 ## Moonbag
 The scorecard also tracks a "moonbag" version of the lotto plan: after the trailing sell, keep 15% forever. 100x coins usually dip 50%+ several times on the way, which shakes out every trailing stop. The moonbag is how you're still holding when one runs.
 
