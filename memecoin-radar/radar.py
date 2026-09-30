@@ -456,23 +456,26 @@ COPYCAT_MIN_VOL_H1 = 100_000
 
 
 def story_coin_symbols():
-    """{TICKER: real contract} from sleepers.txt comments like '# Super Inu $SI - ...'."""
+    """{TICKER: {real contracts}} from sleepers.txt and auto_sleepers.txt comments like '# Super Inu $SI - ...'.
+    A ticker can have several real coins: 30 Sep, Super Inu (DEW9dS...) and Super Intelligence (9aqmJj..., 8.7x)
+    are both $SI, and mapping $SI to one address blocked the other as a "copycat"."""
     out = {}
-    try:
-        with open(os.path.join(HERE, SLEEPER_FILE), encoding="utf-8") as f:
-            for ln in f:
-                ca, _, note = ln.partition("#")
-                ca = ca.strip()
-                if not ca:
-                    continue
-                words = note.split()
-                syms = {w.lstrip("$").upper() for w in words if w.startswith("$")}
-                if not syms and words:          # no $TICKER in the note -> first word is the ticker (JIMOTHY)
-                    syms.add(words[0].upper())
-                for sym in syms:
-                    out[sym] = ca
-    except FileNotFoundError:
-        pass
+    for fn in (SLEEPER_FILE, AUTO_SLEEPER_FILE):
+        try:
+            with open(os.path.join(HERE, fn), encoding="utf-8") as f:
+                for ln in f:
+                    ca, _, note = ln.partition("#")
+                    ca = ca.strip()
+                    if not ca:
+                        continue
+                    words = note.split()
+                    syms = {w.lstrip("$").upper() for w in words if w.startswith("$")}
+                    if not syms and words:          # no $TICKER in the note -> first word is the ticker (JIMOTHY)
+                        syms.add(words[0].upper())
+                    for sym in syms:
+                        out.setdefault(sym, set()).add(ca)
+        except FileNotFoundError:
+            pass
     return out
 
 
@@ -720,13 +723,14 @@ def ai_deep_check(kind, m, extra, rc_notes, flags):
 
 
 def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
-    real = story_coin_symbols().get(m["symbol"].lstrip("$").upper())
-    if real and real != m["addr"]:
+    reals = story_coin_symbols().get(m["symbol"].lstrip("$").upper()) or set()
+    if reals and m["addr"] not in reals:
+        real = ", ".join(sorted(a[:6] + "..." for a in reals))
         # 30 Sep: the $24K "$SI" copy died (0.16x) but the $1.01M one did 7.2x - big copies have real traction
         if m["mcap"] < COPYCAT_MIN_MCAP or m["vol_h1"] < COPYCAT_MIN_VOL_H1:
-            log(f"skipped copycat ${m['symbol']} ({m['addr'][:6]}...) - the real story coin is {real[:6]}...")
+            log(f"skipped copycat ${m['symbol']} ({m['addr'][:6]}...) - the real story coin is {real}")
             return
-        extra = (f"COPYCAT WARNING: not the original ${m['symbol']} ({real[:6]}...), but it has real money "
+        extra = (f"COPYCAT WARNING: not the original ${m['symbol']} ({real}), but it has real money "
                  f"behind it. Double-check the CA.\n" + extra)
     if NARRATIVE_MODE and kind in MOMENTUM_KINDS and not (flags or {}).get("story"):
         log_candidate(kind, m, False, ["silent (momentum only)"], flags)   # paper-traded, no phone ping
