@@ -44,7 +44,7 @@ RUNNER_MIN_AGE_MINUTES = 20       # snipers dump ~85% within 5 min of launch - l
 RUNNER_MIN_M5_CHANGE_ALLOWED = -10  # skip coins falling hard in the last 5 minutes
 
 # Graduation rules (pump.fun coins that just migrated)
-GRAD_RECHECK_MINUTES = 10         # wait, then check it's holding
+GRAD_RECHECK_MINUTES = 45         # must SURVIVE this long after migration (GOCARDS died in 15 min)
 GRAD_MIN_MCAP = 80_000            # still above the ~$69K migration point after the wait
 
 # Keyword rules (catalyst phrases)
@@ -166,20 +166,104 @@ def dex_search(q):
         return []
 
 
+# Safety thresholds (from research on top traders' GMGN/Axiom presets + rug post-mortems, 2026-09-30)
+MAX_INSIDER_PCT = 15        # RugCheck-flagged insider wallets' combined % of supply
+MAX_SINGLE_HOLDER_PCT = 20  # any one non-pool wallet
+MAX_TOP10_PCT = 30          # top-10 non-pool holders combined (consensus 20-30%)
+MAX_DEV_PCT = 10            # creator's own holding
+MAX_TRANSFER_FEE_PCT = 10
+HARD_REJECT_RISKS = ("creator history of rugged", "single holder ownership", "top 10 holders high ownership",
+                     "honeypot", "freeze authority", "mint authority")
+_rc_cache = {}
+
+
 def rugcheck(mint):
-    """Returns (ok, notes). ok=False on serious red flags. Unknown -> ok=True with note."""
+    """Full RugCheck report -> (ok, notes, verified). Higher RugCheck score = WORSE.
+    Rejects on: rugged, active mint/freeze, insiders >15%, single holder >20%, top-10 >30%, dev >10%,
+    transfer fee >10%, known hard-risk names, or 2+ 'danger' risks. Pool/AMM accounts are excluded."""
+    now = time.time()
+    if mint in _rc_cache and now - _rc_cache[mint][0] < 300:
+        return _rc_cache[mint][1]
     try:
-        r = http_json(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary")
+        r = http_json(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report")
+        time.sleep(1.0)  # RugCheck allows ~1 req/s
     except Exception as e:
-        return True, f"RugCheck unavailable ({type(e).__name__}) - check manually"
+        res = (True, f"RugCheck unavailable ({type(e).__name__}) - UNVERIFIED, check GMGN manually", False)
+        _rc_cache[mint] = (now, res)
+        return res
+    reasons, warns = [], []
+    if r.get("rugged"):
+        reasons.append("already rugged")
+    if r.get("mintAuthority") or (r.get("token") or {}).get("mintAuthority"):
+        reasons.append("mint authority active")
+    if r.get("freezeAuthority") or (r.get("token") or {}).get("freezeAuthority"):
+        reasons.append("freeze authority active")
+    known = r.get("knownAccounts") or {}
+    def is_pool(h):
+        for key in (h.get("owner"), h.get("address")):
+            if key and str((known.get(key) or {}).get("type", "")).upper() in ("AMM", "LOCKER", "POOL"):
+                return True
+        return False
+    holders = [h for h in (r.get("topHolders") or []) if not is_pool(h)]
+    pcts = sorted((float(h.get("pct") or 0) for h in holders), reverse=True)
+    top1, top10 = (pcts[0] if pcts else 0), sum(pcts[:10])
+    insider_pct = sum(float(h.get("pct") or 0) for h in holders if h.get("insider"))
+    creator = r.get("creator")
+    dev_pct = sum(float(h.get("pct") or 0) for h in holders if creator and h.get("owner") == creator)
+    if insider_pct > MAX_INSIDER_PCT:
+        reasons.append(f"insiders hold {insider_pct:.0f}%")
+    if top1 > MAX_SINGLE_HOLDER_PCT:
+        reasons.append(f"one wallet holds {top1:.0f}%")
+    if top10 > MAX_TOP10_PCT:
+        reasons.append(f"top-10 hold {top10:.0f}%")
+    if dev_pct > MAX_DEV_PCT:
+        reasons.append(f"dev holds {dev_pct:.0f}%")
+    fee = float(((r.get("transferFee") or {}).get("pct")) or 0)
+    if fee > MAX_TRANSFER_FEE_PCT:
+        reasons.append(f"transfer fee {fee:.0f}%")
     risks = r.get("risks") or []
     names = [str(x.get("name", "")) for x in risks]
-    danger = [str(x.get("name", "")) for x in risks if str(x.get("level", "")).lower() == "danger"]
-    lowered = " ".join(names).lower()
-    hard_fail = ("mint authority" in lowered) or ("freeze authority" in lowered) or len(danger) >= 2
+    for n in names:
+        if any(k in n.lower() for k in HARD_REJECT_RISKS):
+            reasons.append(n)
+    danger = [n for n, x in zip(names, risks) if str(x.get("level", "")).lower() == "danger"]
+    if len(danger) >= 2:
+        reasons.append("2+ danger risks")
+    if r.get("insiderNetworks"):
+        warns.append(f"insider network detected ({len(r['insiderNetworks'])})")
+    if int(r.get("graphInsidersDetected") or 0) > 0:
+        warns.append(f"{r.get('graphInsidersDetected')} linked insider wallets")
     score = r.get("score_normalised", r.get("score"))
-    notes = f"RugCheck score {score}; risks: {', '.join(names[:4]) or 'none listed'}"
-    return (not hard_fail), notes
+    notes = (f"RugCheck {score} (higher=worse) | top10 {top10:.0f}% | top1 {top1:.0f}% | insiders {insider_pct:.0f}%"
+             + (f" | dev {dev_pct:.0f}%" if creator else "")
+             + (f" | WARN: {'; '.join(warns)}" if warns else ""))
+    if reasons:
+        notes += " | REJECT: " + "; ".join(dict.fromkeys(reasons))
+    res = (not reasons, notes, True)
+    _rc_cache[mint] = (now, res)
+    return res
+
+
+def goplus_base(addr):
+    """Base (EVM) honeypot/tax check via GoPlus (free, no key). -> (ok, notes, verified)"""
+    try:
+        r = http_json(f"https://api.gopluslabs.io/api/v1/token_security/8453?contract_addresses={addr}")
+        d = (r.get("result") or {}).get(addr.lower()) or {}
+    except Exception as e:
+        return True, f"GoPlus unavailable ({type(e).__name__}) - UNVERIFIED, check manually", False
+    if not d:
+        return True, "GoPlus: token not indexed yet - UNVERIFIED", False
+    bad = []
+    for k, label in (("is_honeypot", "honeypot"), ("cannot_sell_all", "can't sell all"),
+                     ("owner_change_balance", "owner can change balances"), ("hidden_owner", "hidden owner"),
+                     ("transfer_pausable", "transfers pausable")):
+        if str(d.get(k)) == "1":
+            bad.append(label)
+    tax = max(float(d.get("sell_tax") or 0), float(d.get("buy_tax") or 0))
+    if tax > 0.10:
+        bad.append(f"tax {tax*100:.0f}%")
+    notes = f"GoPlus: sell tax {float(d.get('sell_tax') or 0)*100:.0f}%" + (f" | REJECT: {'; '.join(bad)}" if bad else "")
+    return (not bad), notes, True
 
 
 # ----------------------------- pair metrics -----------------------------
@@ -206,7 +290,20 @@ def metrics(p):
         "sells_h1": int(h1.get("sells") or 0),
         "age_h": age_h,
         "price": float(p.get("priceUsd") or 0),
+        "buys_m5": int((tx.get("m5") or {}).get("buys") or 0),
+        "sells_m5": int((tx.get("m5") or {}).get("sells") or 0),
+        "dex": p.get("dexId", ""),
+        "has_social": bool(((p.get("info") or {}).get("socials")) or ((p.get("info") or {}).get("websites"))),
     }
+
+
+def dumping_now(m):
+    """5-minute sell pressure: sells outnumber buys 2:1 while price falls (insider exit / post-migration dump)."""
+    return m["sells_m5"] > 2 * max(m["buys_m5"], 1) and m["chg_m5"] < 0
+
+
+def on_bonding_curve(m):
+    return m["dex"] == "pumpfun"
 
 
 def is_early_runner(m):
@@ -221,6 +318,8 @@ def is_early_runner(m):
         and m["liq"] >= RUNNER_MIN_LIQUIDITY
         and m["age_h"] * 60 >= RUNNER_MIN_AGE_MINUTES
         and m["chg_m5"] >= RUNNER_MIN_M5_CHANGE_ALLOWED
+        and not dumping_now(m)
+        and m["has_social"]                     # consensus: at least one social link
     )
 
 
@@ -231,6 +330,7 @@ def is_keyword_mover(m):
         and m["mcap"] >= RUNNER_MIN_MCAP
         and m["liq"] >= RUNNER_MIN_LIQUIDITY
         and m["chg_m5"] >= RUNNER_MIN_M5_CHANGE_ALLOWED
+        and not dumping_now(m)
         and m["vol_h1"] >= KEYWORD_MIN_H1_VOLUME
         and m["chg_h1"] >= KEYWORD_MIN_H1_CHANGE
         and m["buys_h1"] >= m["sells_h1"]
@@ -260,17 +360,27 @@ def alert(state, kind, m, extra=""):
     if not state.under_cap():
         log(f"hourly alert cap reached, skipping {m['symbol']}")
         return
-    ok, rc_notes = (True, "RugCheck: n/a on Base - check GoPlus/GMGN")
     if m["chain"] == "solana":
-        ok, rc_notes = rugcheck(m["addr"])
+        ok, rc_notes, verified = rugcheck(m["addr"])
+    else:
+        ok, rc_notes, verified = goplus_base(m["addr"])
     if not ok:
         log(f"RugCheck FAIL, skipped {m['symbol']}: {rc_notes}")
         state.alerted[m["addr"]] = m["mcap"]  # don't recheck the same rug every minute
         state.save()
         return
     # Strong setup = big move on heavy volume with buyers clearly outnumbering sellers -> urgent "act now" ping
-    strong = (m["chg_h1"] >= 100 and m["chg_m5"] >= 0 and m["buys_h1"] >= 1.5 * max(m["sells_h1"], 1)
+    # ACT NOW only for coins that are verified safe, OFF the bonding curve and have survived 45+ min since
+    # migration (the new pool's age) - GOCARDS dumped -96% within 15 min of migrating.
+    strong = (verified and not on_bonding_curve(m) and m["age_h"] * 60 >= 45
+              and m["chg_h1"] >= 100 and m["chg_m5"] >= 0 and m["buys_h1"] >= 1.5 * max(m["sells_h1"], 1)
               and m["vol_h1"] >= 50_000 and m["mcap"] <= 1_000_000)
+    if on_bonding_curve(m) and kind == "EARLY RUNNER":
+        kind = "BONDING-CURVE LOTTO"
+        extra = ("Still on pump.fun's bonding curve: highest-risk stage (most dumps happen at/just after "
+                 "migration). Lottery size only, or wait for it to migrate and hold 45+ min.\n" + extra)
+    if not verified:
+        extra = "SAFETY UNVERIFIED - check GMGN (bundlers/insiders/top10) before anything.\n" + extra
     if strong:
         title = f"ACT NOW (10-min window): ${m['symbol']} {fmt_usd(m['mcap'])} {m['chg_h1']:+.0f}% 1h"
         extra = ("STRONG SETUP: buyers heavily outnumber sellers on big volume. If GMGN checks pass, "
@@ -565,13 +675,19 @@ async def graduations_loop(state):
     loop = asyncio.get_running_loop()
 
     async def recheck(mint):
-        await asyncio.sleep(GRAD_RECHECK_MINUTES * 60)
-        pairs = await loop.run_in_executor(None, dex_pairs_for_tokens, "solana", [mint])
-        p = pairs.get(mint)
+        await asyncio.sleep(15 * 60)
+        first = (await loop.run_in_executor(None, dex_pairs_for_tokens, "solana", [mint])).get(mint)
+        if not first or dumping_now(metrics(first)):
+            return
+        p15 = metrics(first)["price"]
+        await asyncio.sleep((GRAD_RECHECK_MINUTES - 15) * 60)
+        p = (await loop.run_in_executor(None, dex_pairs_for_tokens, "solana", [mint])).get(mint)
         if not p:
             return
         m = metrics(p)
-        if (m["mcap"] >= GRAD_MIN_MCAP and m["chg_m5"] >= 0 and m["buys_h1"] >= m["sells_h1"]
+        if p15 and m["price"] < 0.7 * p15:      # gave back >30% since the 15-min mark -> insiders exiting
+            return
+        if (m["mcap"] >= GRAD_MIN_MCAP and m["chg_m5"] >= 0 and not dumping_now(m) and m["buys_h1"] >= m["sells_h1"]
                 and m["vol_h1"] >= RUNNER_MIN_H1_VOLUME and m["liq"] >= RUNNER_MIN_LIQUIDITY):
             await loop.run_in_executor(None, alert, state, "GRADUATED & HOLDING", m,
                                        f"Migrated off pump.fun ~{GRAD_RECHECK_MINUTES} min ago and still holding. "
