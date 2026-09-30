@@ -81,6 +81,16 @@ You can check it any time with `python radar.py --scorecard`. Run `python radar.
 ## Exit alerts for coins you hold (positions.txt)
 When you buy something, add a line to `positions.txt`: `<contract address> <average cost in $>` (copy "Average cost" from Coinbase). The radar checks every 30 seconds and sends an **urgent** ping to: sell half at 2x, sell a quarter at 3x, **STOP at −30%**, sell the rest at 40% off the peak, plus a **DUMP WARNING** when sellers flood in. Delete the line when you've sold.
 
+## Narrative mode (on by default)
+On 30 Sep, every price-only ping we could check fell 30% before reaching 2x, and most peaked within 3 minutes of the ping. So your phone now pings **only when there is a story**:
+- **CATALYST:** a coin matching a phrase from Trump, Elon, the news or trends
+- **RUNNER / IGNITION + REAL STORY:** a pumping coin that matches a trending phrase
+- **SLEEPER WAKING:** Jimothy, Super Inu and the other story coins
+- **SMART MONEY:** 2+ tracked wallets buying the same coin
+- **X VIP posts:** needs `x_token.txt`
+
+Price-only coins are still tracked silently on paper and shown in the 21:00 scorecard. To get those pings back, set `NARRATIVE_MODE = False` in `radar.py`.
+
 ## IGNITION pings (catching the START of a move)
 Earlier pings needed +50% in the hour, so they arrived after the move (SGI at $151K, HERO/SARKA on a bounce inside a dump). The radar now also:
 - watches **every new pump.fun launch**, every migration, and GeckoTerminal's "trending in the last 5 minutes"

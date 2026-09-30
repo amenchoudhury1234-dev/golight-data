@@ -58,6 +58,14 @@ KEYWORD_MIN_H1_CHANGE = 20
 KEYWORD_MIN_H1_VOLUME = 10_000
 KEYWORD_MAX_MCAP = 30_000_000
 
+# NARRATIVE MODE (30 Sep review): 11 of 11 checkable pure-momentum pings hit -30% before 2x; 5 peaked within 3 min
+# of the ping. So price-only pings (runner, ignition, graduation, second leg) are now SILENT: still paper-traded
+# and shown in the 21:00 scorecard, but no phone ping unless the coin matches a real-world story. Phone pings
+# come from: CATALYST, RUNNER/IGNITION + REAL STORY, SLEEPER WAKING, SMART MONEY and the X VIP watch.
+# Set to False to get the momentum pings back.
+NARRATIVE_MODE = True
+MOMENTUM_KINDS = {"EARLY RUNNER", "IGNITION", "GRADUATED & HOLDING", "SECOND LEG"}
+
 # Safety / noise
 MAX_ALERTS_PER_HOUR = 6
 REALERT_IF_MCAP_MULTIPLIED = 2.0  # alert the same coin again only if its mcap doubled since last alert
@@ -456,6 +464,9 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     real = story_coin_symbols().get(m["symbol"].lstrip("$").upper())
     if real and real != m["addr"]:
         log(f"skipped copycat ${m['symbol']} ({m['addr'][:6]}...) - the real story coin is {real[:6]}...")
+        return
+    if NARRATIVE_MODE and kind in MOMENTUM_KINDS and not (flags or {}).get("story"):
+        log_candidate(kind, m, False, ["silent (momentum only)"], flags)   # paper-traded, no phone ping
         return
     prev = state.alerted.get(m["addr"])
     if not skip_dedupe and not state.should_alert(m["addr"], m["mcap"]):
