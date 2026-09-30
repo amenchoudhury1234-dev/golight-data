@@ -14,6 +14,7 @@ import json
 import re
 import sys
 import time
+import urllib.error
 import urllib.request
 
 ALERT_TOPIC = "scout-alert-c639f2f6f2bd1f4401"
@@ -23,9 +24,17 @@ NETS = {"solana": "solana", "base": "base"}
 
 
 def get(url):
-    req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return r.read().decode("utf-8")
+    """GET with patience for GeckoTerminal's free limit: waits 30s, 60s, 90s on 'Too Many Requests'."""
+    for wait in (30, 60, 90, None):
+        try:
+            req = urllib.request.Request(url, headers=UA)
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or wait is None:
+                raise
+            print(f"   (rate limited - waiting {wait}s)")
+            time.sleep(wait)
 
 
 def fetch_pings(hours):
@@ -75,25 +84,26 @@ def candles(chain, pool, since_ts):
         if oldest <= since_ts:
             break
         before = oldest
-        time.sleep(2.5)
+        time.sleep(6)
     return sorted({r[0]: r for r in rows}.values())
 
 
-def paper(xs):
-    """Rules: sell half at 2x, stop at 0.70 before that, then trail 40% off the peak. Returns multiple of stake."""
+def paper(xs, stop=0.70, trail=0.40):
+    """Sell half at 2x, stop before that (stop=0 means no stop), then trail off the peak. xs = [(low, high, close)]
+    as multiples of the entry price. A stop fills at that minute's close if it gapped through (e/acc went to 0.01x)."""
     peak, half, realised = 1.0, False, 0.0
-    for lo, hi in xs:
+    for lo, hi, cl in xs:
         if not half:
-            if lo <= 0.70:            # assume the stop hit first if both happen in the same minute (worst case)
-                return 0.70
+            if stop and lo <= stop:   # assume the stop hit first if both happen in the same minute (worst case)
+                return min(stop, cl)
             if hi >= 2.0:
                 half, realised, peak = True, 1.0, hi
                 continue
         else:
             peak = max(peak, hi)
-            if lo <= peak * 0.60:
-                return realised + 0.5 * peak * 0.60
-    last = xs[-1][1] if xs else 1.0
+            if lo <= peak * (1 - trail):
+                return realised + 0.5 * min(peak * (1 - trail), cl)
+    last = xs[-1][2] if xs else 1.0
     return realised + (0.5 if half else 1.0) * last
 
 
@@ -105,7 +115,7 @@ def main():
     hours = int(sys.argv[1]) if len(sys.argv) > 1 else 12
     pings = fetch_pings(hours)
     print(f"{len(pings)} coin pings in the last {hours}h - looking each one up (about 5s per coin)...\n")
-    lines, total = [], 0.0
+    lines, total, total_lotto = [], 0.0, 0.0
     for p in pings:
         try:
             pool, sym, mcap_now = best_pool(p["chain"], p["ca"])
@@ -118,23 +128,26 @@ def main():
                 lines.append(f"{p['title'][:40]} | no price history")
                 continue
             entry = after[0][4] if after[0][0] < p["t"] else after[0][1]
-            xs = [(c[3] / entry, c[2] / entry) for c in after]
+            xs = [(c[3] / entry, c[2] / entry, c[4] / entry) for c in after]
             peak_i = max(range(len(xs)), key=lambda i: xs[i][1])
             peak_x = xs[peak_i][1]
             low_before_peak = min(x[0] for x in xs[: peak_i + 1])
             mins_to_peak = (after[peak_i][0] - p["t"]) / 60
             now_x = mcap_now / p["mcap"] if p["mcap"] else 0
             res = paper(xs)
+            lotto = paper(xs, stop=0, trail=0.50)
             total += (res - 1) * 50
+            total_lotto += (lotto - 1) * 50
             t = time.strftime("%H:%M", time.localtime(p["t"]))
             lines.append(f"{t} {p['kind'][:14]} ${sym} at {fmt(p['mcap'])} | peak {peak_x:.2f}x after {mins_to_peak:.0f}m"
                          f" (dipped to {low_before_peak:.2f}x first) | now {now_x:.2f}x ({fmt(mcap_now)})"
-                         f" | rules {(res - 1) * 50:+.0f} GBP")
+                         f" | rules {(res - 1) * 50:+.0f} | lotto {(lotto - 1) * 50:+.0f} GBP")
         except Exception as e:
             lines.append(f"{p['title'][:40]} | error: {e}")
         print(lines[-1])
-        time.sleep(2.5)
-    summary = f"TOTAL if GBP50 on every ping with the rules: {total:+.0f} GBP"
+        time.sleep(6)
+    summary = (f"TOTAL if GBP50 on every ping: rules (stop -30%) {total:+.0f} GBP | "
+               f"lotto (no stop, half at 2x, trail 50%) {total_lotto:+.0f} GBP")
     print("\n" + summary)
     body = "\n".join(lines + [summary])
     req = urllib.request.Request("https://ntfy.sh/", headers={"Content-Type": "application/json", **UA}, method="POST",

@@ -22,7 +22,9 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -80,6 +82,28 @@ def http_json(url, timeout=15):
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
+
+
+GECKO_LOCK = threading.Lock()
+GECKO_GAP_SECONDS = 4          # GeckoTerminal's free API returns 429 when calls come back to back
+GECKO_BACKOFF_SECONDS = 300    # after a 429, leave it alone for 5 min
+_gecko = {"last": 0.0, "until": 0.0}
+
+
+def gecko_json(url):
+    """GeckoTerminal call, spaced out and backing off after 'Too Many Requests'."""
+    with GECKO_LOCK:
+        now = time.time()
+        if now < _gecko["until"]:
+            raise RuntimeError(f"backing off after rate limit ({_gecko['until'] - now:.0f}s left)")
+        time.sleep(max(0.0, _gecko["last"] + GECKO_GAP_SECONDS - now))
+        _gecko["last"] = time.time()
+        try:
+            return http_json(url)
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                _gecko["until"] = time.time() + GECKO_BACKOFF_SECONDS
+            raise
 
 
 def fmt_usd(x):
@@ -499,7 +523,7 @@ def gecko_trending_tokens():
     out = {}
     for net in ("solana", "base"):
         try:
-            d = http_json(f"https://api.geckoterminal.com/api/v2/networks/{net}/trending_pools?page=1")
+            d = gecko_json(f"https://api.geckoterminal.com/api/v2/networks/{net}/trending_pools?page=1")
         except Exception as e:
             log(f"geckoterminal ({net}) unavailable: {e}")
             continue
@@ -1093,7 +1117,6 @@ async def sleepers_loop(state):
 # Every ping AND every near-miss the filters rejected ("shadow") is logged with its features, then tracked
 # every ~45s for 3h and every 10 min to 24h. Each one is paper-traded with the current rules plus two
 # alternatives, so the daily scorecard shows what the rules WOULD have made - and what the filters cost us.
-import threading
 
 PINGS_FILE = "pings_log.json"
 SCORECARD_HOUR = 21           # local time for the daily scorecard ping
@@ -1439,7 +1462,7 @@ IGN_MIN_LIQ = 5_000             # (not checked on the bonding curve)
 IGN_NEW_HIGH = 0.95             # price must be within 5% of the highest we've seen in 30 min (breakout, not bounce)
 IGN_HOT_MINUTES = 90            # how long a coin stays on the fast watch
 IGN_MAX_HOT = 450
-GECKO_FAST_SECONDS = 40
+GECKO_FAST_SECONDS = 90
 NURSERY_MINUTES = 60            # brand-new pump.fun launches, swept once a minute
 NURSERY_MAX = 1500
 NURSERY_PROMOTE_MCAP = 12_000   # a launch that gets past this goes onto the fast watch
@@ -1515,7 +1538,7 @@ def gecko_fast_tokens():
     for net in ("solana", "base"):
         for path in ("trending_pools?duration=5m&page=1", "new_pools?page=1"):
             try:
-                d = http_json(f"https://api.geckoterminal.com/api/v2/networks/{net}/{path}")
+                d = gecko_json(f"https://api.geckoterminal.com/api/v2/networks/{net}/{path}")
             except Exception as e:
                 log(f"geckoterminal fast feed ({net}) unavailable: {e}")
                 continue
@@ -1610,7 +1633,7 @@ async def ignition_loop(state):
 # 4-5 min late. Every pinged coin and every near-miss is re-checked every 45s for 3h; we ping the moment it
 # re-accelerates: 5-min volume >= 3x its recent pace, price +15% in 5 min, buys >= 1.5x sells in 5 min.
 WATCH = {}                   # addr -> (added_time, chain)
-WATCH_HOURS = 3
+WATCH_HOURS = 6              # CROOK and terrafying fell ~80% after the ping and only ran 2-3.5h later
 LEG_POLL_SECONDS = 45
 LEG_MIN_M5_CHANGE = 15
 LEG_VOL_MULTIPLE = 3.0
