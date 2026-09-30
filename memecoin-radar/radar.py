@@ -286,6 +286,7 @@ def metrics(p):
         "mcap": float(p.get("marketCap") or p.get("fdv") or 0),
         "liq": g("liquidity", "usd"),
         "vol_h1": g("volume", "h1"),
+        "vol_m5": g("volume", "m5"),
         "vol_h24": g("volume", "h24"),
         "chg_m5": g("priceChange", "m5"),
         "chg_h1": g("priceChange", "h1"),
@@ -364,8 +365,8 @@ def send_ntfy(title, body, click=None, priority="high", tags="rotating_light"):
     return ok
 
 
-def alert(state, kind, m, extra=""):
-    if not state.should_alert(m["addr"], m["mcap"]):
+def alert(state, kind, m, extra="", skip_dedupe=False):
+    if not skip_dedupe and not state.should_alert(m["addr"], m["mcap"]):
         return
     if not state.under_cap():
         log(f"hourly alert cap reached, skipping {m['symbol']}")
@@ -422,6 +423,9 @@ async def runners_loop(state):
                 pairs = await loop.run_in_executor(None, dex_pairs_for_tokens, chain, addrs)
                 for p in pairs.values():
                     m = metrics(p)
+                    if (m["chain"] in CHAINS and m["mcap"] >= RUNNER_MIN_MCAP and m["vol_h1"] >= RUNNER_MIN_H1_VOLUME
+                            and m["chg_h1"] >= RUNNER_MIN_H1_CHANGE):
+                        WATCH[m["addr"]] = (time.time(), m["chain"])   # near-miss or ping -> second-leg watch
                     if is_early_runner(m):
                         story = real_world_match(m)
                         if story:
@@ -1056,6 +1060,54 @@ async def scorecard_loop(state):
         await asyncio.sleep(OUTCOME_CHECK_MINUTES * 60)
 
 
+# ----------------------------- SECOND LEG (re-acceleration) -----------------------------
+# CROOK (30 Sep): pinged at 13:56, dipped ~50%, then a vertical +400% leg started ~14:08 and our next ping came
+# 4-5 min late. Every pinged coin and every near-miss is re-checked every 45s for 3h; we ping the moment it
+# re-accelerates: 5-min volume >= 3x its recent pace, price +15% in 5 min, buys >= 1.5x sells in 5 min.
+WATCH = {}                   # addr -> (added_time, chain)
+WATCH_HOURS = 3
+LEG_POLL_SECONDS = 45
+LEG_MIN_M5_CHANGE = 15
+LEG_VOL_MULTIPLE = 3.0
+LEG_REALERT_MINUTES = 30
+
+
+async def second_leg_loop(state):
+    loop = asyncio.get_running_loop()
+    last_leg = {}
+    while True:
+        try:
+            now = time.time()
+            for p in _load_pings():                       # everything we've pinged recently
+                if now - p["t"] <= WATCH_HOURS * 3600:
+                    WATCH.setdefault(p["addr"], (p["t"], p["chain"]))
+            for a, (t, _) in list(WATCH.items()):
+                if now - t > WATCH_HOURS * 3600:
+                    WATCH.pop(a, None)
+            by_chain = {}
+            for a, (_, c) in WATCH.items():
+                by_chain.setdefault(c, []).append(a)
+            for chain, addrs in by_chain.items():
+                pairs = await loop.run_in_executor(None, dex_pairs_for_tokens, chain, addrs)
+                for addr, pr in pairs.items():
+                    m = metrics(pr)
+                    pace_5m = m["vol_h1"] / 12 if m["vol_h1"] else 0
+                    if (m["chg_m5"] >= LEG_MIN_M5_CHANGE and pace_5m > 0
+                            and m["vol_m5"] >= LEG_VOL_MULTIPLE * pace_5m
+                            and m["buys_m5"] >= 1.5 * max(m["sells_m5"], 1)
+                            and m["liq"] >= RUNNER_MIN_LIQUIDITY and m["mcap"] <= KEYWORD_MAX_MCAP
+                            and now - last_leg.get(addr, 0) > LEG_REALERT_MINUTES * 60):
+                        last_leg[addr] = now
+                        await loop.run_in_executor(None, lambda: alert(
+                            state, "SECOND LEG", m,
+                            f"Re-accelerating NOW: 5-min volume {m['vol_m5']/pace_5m:.1f}x its recent pace, "
+                            f"{m['buys_m5']}/{m['sells_m5']} buys/sells in 5 min. Legs like this can be caller-driven "
+                            f"and reverse fast - tight stop.", skip_dedupe=True))
+        except Exception as e:
+            log(f"second-leg loop error: {e}")
+        await asyncio.sleep(LEG_POLL_SECONDS)
+
+
 async def main():
     state = State(os.path.join(HERE, STATE_FILE))
     log("Memecoin Radar starting - ALERTS ONLY. Phone topic: " + NTFY_TOPIC)
@@ -1068,7 +1120,7 @@ async def main():
         return
     await asyncio.gather(runners_loop(state), keywords_loop(state), graduations_loop(state),
                          smart_wallets_loop(state), sleepers_loop(state), x_vip_loop(state),
-                         scorecard_loop(state))
+                         scorecard_loop(state), second_leg_loop(state))
 
 
 if __name__ == "__main__":
