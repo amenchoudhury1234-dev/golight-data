@@ -541,13 +541,105 @@ async def graduations_loop(state):
             await asyncio.sleep(15)
 
 
+# ----------------------------- SMART WALLETS (follow wallets, not influencers) -----------------------------
+# Quiet wallets with long, verifiable on-chain records (from research on 2026-09-30; addresses came from
+# public trackers - verify on gmgn.ai/sol/address/<addr> before trusting). A single wallet buying is noise;
+# we alert only when 2+ of them buy the SAME coin within SMART_WINDOW_HOURS ("confluence").
+SMART_WALLETS = {
+    "Euris (anon, ~$10.5M realised, ~82% win rate)": "DfMxre4cKmvogbLrPigxmibVTTQDuzjdXojWzjCXXhzj",
+    "Gake (~$2.5M/3mo, slower style)": "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm",
+    "GMGN smart-money anon": "H72yLkhTnoBfhBTXXaj1RBXuirm8s8G5fcVh2XpQLggM",
+    "Loopierr (Kolscan)": "9yYya3F5EJoLnBNKW6z4bZvyQytMXzDcpU5D6yYr4jqL",
+}
+SMART_MIN_WALLETS = 2
+SMART_WINDOW_HOURS = 6
+SOLANA_RPC = "https://api.mainnet-beta.solana.com"   # free public RPC; swap for a Helius URL if you get a key
+IGNORE_MINTS = {
+    "So11111111111111111111111111111111111111112",   # wrapped SOL
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+}
+
+
+def rpc(method, params):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+    req = urllib.request.Request(SOLANA_RPC, data=body, headers={"Content-Type": "application/json", **UA})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read().decode()).get("result")
+
+
+def token_buys_in_tx(tx, owner):
+    """Mints whose balance for `owner` went UP in this transaction (i.e. the wallet bought them)."""
+    meta = (tx or {}).get("meta") or {}
+    if meta.get("err"):
+        return set()
+    def bal(lst):
+        out = {}
+        for b in lst or []:
+            if b.get("owner") == owner:
+                amt = float(((b.get("uiTokenAmount") or {}).get("uiAmount")) or 0)
+                out[b.get("mint")] = out.get(b.get("mint"), 0) + amt
+        return out
+    pre, post = bal(meta.get("preTokenBalances")), bal(meta.get("postTokenBalances"))
+    return {m for m, v in post.items() if m and m not in IGNORE_MINTS and v > pre.get(m, 0) * 1.0001}
+
+
+async def smart_wallets_loop(state):
+    loop = asyncio.get_running_loop()
+    seen_sigs = {w: set() for w in SMART_WALLETS.values()}
+    first_pass = {w: True for w in SMART_WALLETS.values()}
+    buys = {}   # mint -> {wallet_label: timestamp}
+    while True:
+        for label, wallet in SMART_WALLETS.items():
+            try:
+                sigs = await loop.run_in_executor(None, rpc, "getSignaturesForAddress", [wallet, {"limit": 15}])
+            except Exception as e:
+                log(f"smart wallet RPC error ({label[:12]}): {e}")
+                continue
+            new = [s["signature"] for s in (sigs or []) if s.get("signature") not in seen_sigs[wallet]]
+            seen_sigs[wallet].update(new)
+            if first_pass[wallet]:          # don't replay history on startup
+                first_pass[wallet] = False
+                continue
+            for sig in new[:10]:
+                try:
+                    tx = await loop.run_in_executor(None, rpc, "getTransaction",
+                                                    [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
+                except Exception:
+                    continue
+                for mint in token_buys_in_tx(tx, wallet):
+                    buys.setdefault(mint, {})[label] = time.time()
+                    log(f"smart wallet {label.split(' (')[0]} bought {mint[:8]}...")
+                await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
+        # confluence check
+        cutoff = time.time() - SMART_WINDOW_HOURS * 3600
+        for mint, who in list(buys.items()):
+            who = {k: t for k, t in who.items() if t >= cutoff}
+            if not who:
+                buys.pop(mint, None)
+                continue
+            buys[mint] = who
+            if len(who) >= SMART_MIN_WALLETS:
+                pairs = await loop.run_in_executor(None, dex_pairs_for_tokens, "solana", [mint])
+                p = pairs.get(mint)
+                if p:
+                    m = metrics(p)
+                    if m["mcap"] <= KEYWORD_MAX_MCAP and m["liq"] >= RUNNER_MIN_LIQUIDITY:
+                        names = ", ".join(k.split(" (")[0] for k in who)
+                        await loop.run_in_executor(None, alert, state, "SMART MONEY", m,
+                                                   f"{len(who)} proven quiet wallets bought within {SMART_WINDOW_HOURS}h: {names}")
+        await asyncio.sleep(POLL_SECONDS)
+
+
 async def main():
     state = State(os.path.join(HERE, STATE_FILE))
     log("Memecoin Radar starting - ALERTS ONLY. Phone topic: " + NTFY_TOPIC)
     if "--test" in sys.argv:
         send_ntfy("Radar test", "Memecoin Radar is connected to your phone.", tags="white_check_mark")
         return
-    await asyncio.gather(runners_loop(state), keywords_loop(state), graduations_loop(state))
+    await asyncio.gather(runners_loop(state), keywords_loop(state), graduations_loop(state),
+                         smart_wallets_loop(state))
 
 
 if __name__ == "__main__":
