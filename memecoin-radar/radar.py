@@ -260,7 +260,15 @@ def alert(state, kind, m, extra=""):
         state.alerted[m["addr"]] = m["mcap"]  # don't recheck the same rug every minute
         state.save()
         return
-    title = f"{kind}: ${m['symbol']} {fmt_usd(m['mcap'])} ({m['chg_h1']:+.0f}% 1h)"
+    # Strong setup = big move on heavy volume with buyers clearly outnumbering sellers -> urgent "act now" ping
+    strong = (m["chg_h1"] >= 100 and m["buys_h1"] >= 1.5 * max(m["sells_h1"], 1)
+              and m["vol_h1"] >= 50_000 and m["mcap"] <= 1_000_000)
+    if strong:
+        title = f"ACT NOW (10-min window): ${m['symbol']} {fmt_usd(m['mcap'])} {m['chg_h1']:+.0f}% 1h"
+        extra = ("STRONG SETUP: buyers heavily outnumber sellers on big volume. If GMGN checks pass, "
+                 "enter GBP50-100 now; don't wait for it to 'confirm'.\n" + extra)
+    else:
+        title = f"{kind}: ${m['symbol']} {fmt_usd(m['mcap'])} ({m['chg_h1']:+.0f}% 1h)"
     body = (
         f"{m['name']} (${m['symbol']}) on {m['chain']}\n"
         f"CA: {m['addr']}\n"
@@ -270,7 +278,8 @@ def alert(state, kind, m, extra=""):
         f"BEFORE BUYING: check global fees >=1.5 SOL + bundlers/snipers on GMGN, paste CA into Coinbase.\n"
         f"PLAN: max GBP50-100, sell half at 2x, hard stop -30%. Most of these die - it's a watch, not a promise."
     )
-    if send_ntfy(title, body, click=m["url"] or None):
+    if send_ntfy(title, body, click=m["url"] or None, priority="urgent" if strong else "high",
+                 tags="rotating_light,moneybag" if strong else "rotating_light"):
         state.record(m["addr"], m["mcap"])
 
 
