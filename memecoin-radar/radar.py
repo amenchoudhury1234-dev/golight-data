@@ -56,7 +56,7 @@ KEYWORD_MAX_MCAP = 30_000_000
 # Safety / noise
 MAX_ALERTS_PER_HOUR = 6
 REALERT_IF_MCAP_MULTIPLIED = 2.0  # alert the same coin again only if its mcap doubled since last alert
-POLL_SECONDS = 60
+POLL_SECONDS = 30
 KEYWORD_POLL_SECONDS = 180
 STATE_FILE = "radar_state.json"
 # ------------------------------------------------------------------------------------
@@ -336,6 +336,8 @@ def runner_reasons(m):
         r.append("falling 5m")
     if dumping_now(m):
         r.append("5m dump")
+    if m["chg_h1"] < 0:
+        r.append("dead-cat bounce")   # HERO (-31% 1h, +28% 5m) and SARKA (-24% 1h): a bounce inside a dump
     if not m["has_social"]:
         r.append("no socials")
     return r
@@ -491,6 +493,8 @@ async def runners_loop(state):
                 pairs = await loop.run_in_executor(None, dex_pairs_for_tokens, chain, addrs)
                 for p in pairs.values():
                     m = metrics(p)
+                    if IGN_MIN_MCAP <= m["mcap"] <= IGN_MAX_MCAP and m["age_h"] <= RUNNER_MAX_AGE_HOURS:
+                        hot_add(m["addr"], m["chain"])
                     near = (m["chain"] in CHAINS and m["mcap"] >= RUNNER_MIN_MCAP
                             and m["vol_h1"] >= RUNNER_MIN_H1_VOLUME and m["chg_h1"] >= RUNNER_MIN_H1_CHANGE)
                     if near:
@@ -791,14 +795,20 @@ async def graduations_loop(state):
         try:
             async with websockets.connect("wss://pumpportal.fun/api/data", ping_interval=20) as ws:
                 await ws.send(json.dumps({"method": "subscribeMigration"}))
-                log("connected to PumpPortal (graduations)")
+                await ws.send(json.dumps({"method": "subscribeNewToken"}))
+                log("connected to PumpPortal (new launches + graduations)")
                 async for raw in ws:
                     try:
                         msg = json.loads(raw)
                     except Exception:
                         continue
                     mint = msg.get("mint")
-                    if mint:  # every message on this subscription is a migration event
+                    if not mint:
+                        continue
+                    if msg.get("txType") == "create":     # brand-new pump.fun launch
+                        nursery_add(mint)
+                    else:                                  # migration off the bonding curve
+                        hot_add(mint, "solana")
                         asyncio.create_task(recheck(mint))
         except Exception as e:
             log(f"PumpPortal connection lost ({e}); reconnecting in 15s")
@@ -1062,6 +1072,7 @@ STRATEGIES = {
     "rules": {"stop": 0.70, "half_at": 2.0, "trail": 0.40, "label": "Current rules (half at 2x, stop -30%)"},
     "wide": {"stop": 0.50, "half_at": 2.0, "trail": 0.40, "label": "Wider stop (-50%)"},
     "quick": {"stop": 0.70, "all_at": 2.0, "label": "Sell everything at 2x"},
+    "lotto": {"stop": 0.0, "half_at": 2.0, "trail": 0.50, "label": "Lotto (no stop, half at 2x, trail 50%)"},
 }
 PINGS_LOCK = threading.Lock()
 SHADOW_SEEN = {}
@@ -1373,6 +1384,195 @@ async def positions_loop(state):
         await asyncio.sleep(POS_POLL_SECONDS)
 
 
+# ----------------------------- IGNITION (catch the START of a move) -----------------------------
+# 30 Sep screenshots: SGI pinged at $151K after +196% in the hour (Coinbase showed +4.4K%), and HERO/SARKA/HERZOGIAN
+# pinged after their runs. Every trigger above waits for a move to be FINISHED (+50% 1h). This loop keeps a fast
+# watch on hundreds of young coins, takes its own price snapshot every ~20s, and pings when 5-min volume and buyers
+# suddenly surge while price is pushing to a NEW HIGH - usually the first 10-30% of a move, not the last.
+# Coins get on the watch from: every new pump.fun launch (PumpPortal), every migration, GeckoTerminal's
+# "trending in the last 5 minutes" and newest pools, and DexScreener's feeds.
+IGNITION_POLL_SECONDS = 20
+IGN_MIN_MCAP = 15_000
+IGN_MAX_MCAP = 1_500_000
+IGN_MIN_AGE_MINUTES = 8         # past the launch-sniper dump
+IGN_MIN_VOL_M5 = 6_000          # $ traded in the last 5 min
+IGN_MIN_BUYS_M5 = 25            # a crowd, not 3 wallets
+IGN_BUY_RATIO = 1.8             # buys vs sells in the last 5 min
+IGN_VOL_SURGE = 3.0             # last 5 min's volume vs the coin's own average 5 min earlier in the hour
+IGN_MIN_M5 = 8                  # the move has started ...
+IGN_MAX_M5 = 80                 # ... but isn't already a finished vertical candle
+IGN_MIN_H1 = -5                 # below this it's a dead-cat bounce inside a dump (HERO, SARKA)
+IGN_MAX_H1 = 150                # ran more than this already -> late; SECOND LEG handles it
+IGN_MIN_LIQ = 5_000             # (not checked on the bonding curve)
+IGN_NEW_HIGH = 0.95             # price must be within 5% of the highest we've seen in 30 min (breakout, not bounce)
+IGN_HOT_MINUTES = 90            # how long a coin stays on the fast watch
+IGN_MAX_HOT = 450
+GECKO_FAST_SECONDS = 40
+NURSERY_MINUTES = 60            # brand-new pump.fun launches, swept once a minute
+NURSERY_MAX = 1500
+NURSERY_PROMOTE_MCAP = 12_000   # a launch that gets past this goes onto the fast watch
+
+HOT = {}        # addr -> (added_time, chain)
+NURSERY = {}    # mint -> added_time (solana)
+SNAPS = {}      # addr -> [(time, price)]
+
+
+def hot_add(addr, chain):
+    if chain in CHAINS and addr and addr not in HOT:
+        HOT[addr] = (time.time(), chain)
+
+
+def nursery_add(mint):
+    NURSERY[mint] = time.time()
+    if len(NURSERY) > NURSERY_MAX:
+        for a in sorted(NURSERY, key=NURSERY.get)[: len(NURSERY) - NURSERY_MAX]:
+            NURSERY.pop(a, None)
+
+
+def vol_surge(m):
+    """Last 5 min's volume vs the average 5 min over the rest of the hour."""
+    rest = max(m["vol_h1"] - m["vol_m5"], 0) / 11
+    return m["vol_m5"] / max(rest, 1)
+
+
+def ignition_reasons(m, snaps):
+    """Why a coin is NOT igniting right now (empty list = ping). snaps = our own [(t, price)] history."""
+    r = []
+    if m["chain"] not in CHAINS:
+        r.append("chain")
+    if not IGN_MIN_MCAP <= m["mcap"] <= IGN_MAX_MCAP:
+        r.append("mcap range")
+    if m["age_h"] * 60 < IGN_MIN_AGE_MINUTES:
+        r.append("too new")
+    if m["age_h"] > RUNNER_MAX_AGE_HOURS:
+        r.append("too old")
+    if m["chg_m5"] < IGN_MIN_M5:
+        r.append("not moving")
+    if m["chg_m5"] > IGN_MAX_M5:
+        r.append("candle already vertical")
+    if m["chg_h1"] < IGN_MIN_H1:
+        r.append("dead-cat bounce")
+    if m["chg_h1"] > IGN_MAX_H1:
+        r.append("already ran")
+    if m["vol_m5"] < IGN_MIN_VOL_M5:
+        r.append("low 5m volume")
+    if vol_surge(m) < IGN_VOL_SURGE:
+        r.append("no volume surge")
+    if m["buys_m5"] < IGN_MIN_BUYS_M5:
+        r.append("few 5m buys")
+    if m["buys_m5"] < IGN_BUY_RATIO * max(m["sells_m5"], 1):
+        r.append("sellers keeping up")
+    if not on_bonding_curve(m) and m["liq"] < IGN_MIN_LIQ:
+        r.append("low liquidity")
+    if dumping_now(m):
+        r.append("5m dump")
+    prev = [p for t, p in snaps if p > 0]
+    if not prev:
+        r.append("no history yet")     # wait one more snapshot (~20s) so a single spiky print can't ping
+    else:
+        if m["price"] < prev[-1]:
+            r.append("reversing")      # still igniting must mean still going up right now
+        if m["price"] < IGN_NEW_HIGH * max(prev):
+            r.append("below recent high")
+    return r
+
+
+def gecko_fast_tokens():
+    """GeckoTerminal: pools trending over the last 5 MINUTES + the newest pools (Solana + Base)."""
+    out = {}
+    for net in ("solana", "base"):
+        for path in ("trending_pools?duration=5m&page=1", "new_pools?page=1"):
+            try:
+                d = http_json(f"https://api.geckoterminal.com/api/v2/networks/{net}/{path}")
+            except Exception as e:
+                log(f"geckoterminal fast feed ({net}) unavailable: {e}")
+                continue
+            for pool in d.get("data") or []:
+                tid = ((((pool.get("relationships") or {}).get("base_token") or {}).get("data")) or {}).get("id", "")
+                if tid.startswith(net + "_"):
+                    out.setdefault(net, set()).add(tid.split("_", 1)[1])
+    return out
+
+
+async def nursery_loop(state):
+    """Sweep every new pump.fun launch once a minute; the ones that get real money move to the fast watch."""
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            now = time.time()
+            for a, t in list(NURSERY.items()):
+                if now - t > NURSERY_MINUTES * 60:
+                    NURSERY.pop(a, None)
+            mints = list(NURSERY)
+            if mints:
+                pairs = await loop.run_in_executor(None, dex_pairs_for_tokens, "solana", mints)
+                promoted = 0
+                for addr, pr in pairs.items():
+                    m = metrics(pr)
+                    if m["mcap"] >= NURSERY_PROMOTE_MCAP and m["vol_m5"] > 0:
+                        hot_add(addr, "solana")
+                        NURSERY.pop(addr, None)
+                        promoted += 1
+                log(f"launch sweep: {len(mints)} new launches checked, {promoted} moved to the fast watch")
+        except Exception as e:
+            log(f"launch sweep error: {e}")
+        await asyncio.sleep(60)
+
+
+async def ignition_loop(state):
+    loop = asyncio.get_running_loop()
+    last_gecko = 0
+    last_log = 0
+    while True:
+        try:
+            now = time.time()
+            if now - last_gecko >= GECKO_FAST_SECONDS:
+                last_gecko = now
+                for c, addrs in (await loop.run_in_executor(None, gecko_fast_tokens)).items():
+                    for a in addrs:
+                        hot_add(a, c)
+            for a, (t, _) in list(HOT.items()):
+                if now - t > IGN_HOT_MINUTES * 60:
+                    HOT.pop(a, None)
+                    SNAPS.pop(a, None)
+            if len(HOT) > IGN_MAX_HOT:
+                for a in sorted(HOT, key=lambda k: HOT[k][0])[: len(HOT) - IGN_MAX_HOT]:
+                    HOT.pop(a, None)
+                    SNAPS.pop(a, None)
+            by_chain = {}
+            for a, (_, c) in HOT.items():
+                by_chain.setdefault(c, []).append(a)
+            for chain, addrs in by_chain.items():
+                pairs = await loop.run_in_executor(None, dex_pairs_for_tokens, chain, addrs)
+                for addr, pr in pairs.items():
+                    m = metrics(pr)
+                    snaps = [(t, p) for t, p in SNAPS.get(addr, []) if now - t <= 30 * 60]
+                    reasons = ignition_reasons(m, snaps)
+                    SNAPS[addr] = (snaps + [(now, m["price"])])[-120:]
+                    if not reasons:
+                        surge = round(vol_surge(m), 1)
+                        extra = (f"IGNITION: 5-min volume {surge}x its pace earlier this hour, "
+                                 f"{m['buys_m5']}/{m['sells_m5']} buys/sells in 5 min, price at a new high. "
+                                 f"This is the START of a move - most ignitions fizzle. Lottery size, stop -30%.")
+                        story = real_world_match(m)
+                        if story:
+                            extra = f'REAL-WORLD STORY: matches trending "{story}".\n' + extra
+                        await loop.run_in_executor(None, lambda: alert(
+                            state, "IGNITION", m, extra, flags={"surge": surge, "story": story or ""}))
+                    elif (len(reasons) <= 2 and "no history yet" not in reasons and "mcap range" not in reasons
+                          and m["chg_m5"] >= IGN_MIN_M5 and vol_surge(m) >= IGN_VOL_SURGE
+                          and m["addr"] not in state.alerted):
+                        # near-miss: tracked on paper so the scorecard shows which ignition filter costs us
+                        await loop.run_in_executor(None, lambda: log_candidate(
+                            "IGNITION", m, False, reasons, {"surge": round(vol_surge(m), 1)}))
+            if now - last_log >= 300:
+                last_log = now
+                log(f"ignition watch: {len(HOT)} coins on the 20-second watch, {len(NURSERY)} new launches queued")
+        except Exception as e:
+            log(f"ignition loop error: {e}")
+        await asyncio.sleep(IGNITION_POLL_SECONDS)
+
+
 # ----------------------------- SECOND LEG (re-acceleration) -----------------------------
 # CROOK (30 Sep): pinged at 13:56, dipped ~50%, then a vertical +400% leg started ~14:08 and our next ping came
 # 4-5 min late. Every pinged coin and every near-miss is re-checked every 45s for 3h; we ping the moment it
@@ -1383,6 +1583,8 @@ LEG_POLL_SECONDS = 45
 LEG_MIN_M5_CHANGE = 15
 LEG_VOL_MULTIPLE = 3.0
 LEG_REALERT_MINUTES = 30
+LEG_MIN_H1_CHANGE = 0        # SARKA's "second leg" came at -24% 1h: a bounce inside a dump, not a new leg
+LEG_MIN_AGE_MINUTES = 10     # HERZOGIAN's came at pool age 0.0h: the migration spike itself
 
 
 async def second_leg_loop(state):
@@ -1408,6 +1610,7 @@ async def second_leg_loop(state):
                     m = metrics(pr)
                     pace_5m = m["vol_h1"] / 12 if m["vol_h1"] else 0
                     if (m["chg_m5"] >= LEG_MIN_M5_CHANGE and pace_5m > 0
+                            and m["chg_h1"] >= LEG_MIN_H1_CHANGE and m["age_h"] * 60 >= LEG_MIN_AGE_MINUTES
                             and m["vol_m5"] >= LEG_VOL_MULTIPLE * pace_5m
                             and m["buys_m5"] >= 1.5 * max(m["sells_m5"], 1)
                             and m["liq"] >= RUNNER_MIN_LIQUIDITY and m["mcap"] <= KEYWORD_MAX_MCAP
@@ -1440,7 +1643,7 @@ async def main():
     await asyncio.gather(runners_loop(state), keywords_loop(state), graduations_loop(state),
                          smart_wallets_loop(state), sleepers_loop(state), x_vip_loop(state),
                          scorecard_loop(state), second_leg_loop(state),
-                         positions_loop(state))
+                         positions_loop(state), ignition_loop(state), nursery_loop(state))
 
 
 if __name__ == "__main__":

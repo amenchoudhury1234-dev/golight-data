@@ -67,7 +67,7 @@ Want more accounts, like WhaleInsider or WatcherGuru? Add them to `X_ACCOUNTS` i
 `sleepers.txt` lists "story coins" (Jimothy, Super Inu, Tilcayo, Rizzmas). These often pump **again** when a big account reposts their story without naming the coin. JIMOTHY did +331% after Elon posted a raccoon video. The radar checks them every minute and sends a **SLEEPER WAKING** ping when trading suddenly jumps. I'll add new story coins to the file as they appear.
 
 ## Daily scorecard and paper trading (automatic)
-The radar **paper-trades every ping** with your rules (£50, half out at 2x, stop at −30%) and two alternatives (a wider −50% stop, and selling everything at 2x). It tracks each coin every ~45 seconds for 3 hours, then every 10 minutes for 24 hours.
+The radar **paper-trades every ping** with your rules (£50, half out at 2x, stop at −30%) and three alternatives (a wider −50% stop, selling everything at 2x, and a no-stop "lotto" hold). It tracks each coin every ~45 seconds for 3 hours, then every 10 minutes for 24 hours.
 It also tracks **near-misses the filters rejected**, so we can see what the filters cost us (for example if the "5m dump" filter keeps blocking winners like CROOK).
 
 **Every evening at 21:00** you get a scorecard showing:
@@ -80,6 +80,14 @@ You can check it any time with `python radar.py --scorecard`. Run `python radar.
 
 ## Exit alerts for coins you hold (positions.txt)
 When you buy something, add a line to `positions.txt`: `<contract address> <average cost in $>` (copy "Average cost" from Coinbase). The radar checks every 30 seconds and sends an **urgent** ping to: sell half at 2x, sell a quarter at 3x, **STOP at −30%**, sell the rest at 40% off the peak, plus a **DUMP WARNING** when sellers flood in. Delete the line when you've sold.
+
+## IGNITION pings (catching the START of a move)
+Earlier pings needed +50% in the hour, so they arrived after the move (SGI at $151K, HERO/SARKA on a bounce inside a dump). The radar now also:
+- watches **every new pump.fun launch**, every migration, and GeckoTerminal's "trending in the last 5 minutes"
+- re-checks up to 450 young coins **every 20 seconds** and keeps its own price history
+- sends an **IGNITION** ping when 5-minute volume jumps 3x+ over its earlier pace, buyers outnumber sellers about 2:1, and price is at a **new high** (not a bounce)
+
+Coins that are down on the hour (dead-cat bounces) no longer ping as runners or second legs. IGNITION pings come earlier and fail more often, so treat them as lottery-size only. The scorecard will show whether they pay.
 
 ## Ping labels
 - **RE-ALERT (doubled):** the coin already pinged and has since doubled. It's a late ping with higher risk; CROOK's re-alert was the one that lost.
