@@ -325,8 +325,9 @@ def metrics(p):
     created = p.get("pairCreatedAt") or 0
     age_h = (time.time() * 1000 - created) / 3_600_000 if created else 9999
     return {
-        "name": (p.get("baseToken") or {}).get("name", "?"),
-        "symbol": (p.get("baseToken") or {}).get("symbol", "?"),
+        "name": ((p.get("baseToken") or {}).get("name") or "?").strip(),
+        # strip(): DexScreener has e.g. "Pnut " with a trailing space, which broke exact ticker matches
+        "symbol": ((p.get("baseToken") or {}).get("symbol") or "?").strip(),
         "addr": (p.get("baseToken") or {}).get("address", ""),
         "chain": p.get("chainId", "?"),
         "url": p.get("url", ""),
@@ -447,8 +448,11 @@ def coinbase_url(m):
     (emoji, non-Latin) or the coin is on Base (format not tested), fall back to coinbase.com/price/<contract>,
     which opens Coinbase's search with only that coin listed (one extra tap)."""
     import re
-    slug = re.sub(r"[^a-z0-9]+", "-", (m.get("name") or "").lower()).strip("-")
-    if slug and m.get("chain") == "solana":
+    name = (m.get("name") or "").strip()
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    # Only plain names (letters/digits/spaces) are verified to map exactly; punctuation ("Act I : The AI Prophecy")
+    # might slug differently on Coinbase's side, so those use the search link, which always works.
+    if slug and m.get("chain") == "solana" and re.fullmatch(r"[A-Za-z0-9 ]+", name):
         return f"https://www.coinbase.com/price/{slug}-solana-{m['addr'].lower()}-token"
     return f"https://www.coinbase.com/price/{m['addr']}"
 
@@ -1009,6 +1013,93 @@ async def truth_ca_loop(state):
         await asyncio.sleep(TRUTH_CA_POLL_SECONDS)
 
 
+# ----------------------------- EXCHANGE LISTINGS (2024's most repeatable catalyst) -----------------------------
+# 80% of the memecoins Binance listed in 2024 jumped after the listing (ACT +1,000%, MOODENG +100% on a futures
+# listing alone, NEIRO ~7,600% over its run). Upbit (Korea) listings are known for sudden pumps too. Both publish
+# announcements on free endpoints; checked every 30s. The listing IS the catalyst, so no AI check (speed).
+LISTING_POLL_SECONDS = 30
+LISTING_MIN_MCAP = 5_000_000      # 30 Sep test: Binance listed Hyperliquid's HYPE; a $101K Solana "HYPE" is a copy
+BINANCE_LISTINGS = ("https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
+                    "?type=1&catalogId=48&pageNo=1&pageSize=10")
+UPBIT_LISTINGS = "https://api-manager.upbit.com/api/v1/announcements?os=web&page=1&per_page=10&category=trade"
+LISTING_SKIP_WORDS = ("bstock", "stock", "tradfi", "collateral", "delist", "removal", "margin", "loans", "earn",
+                      "simple earn", "vip loan", "copy trading", "convert")
+
+
+def _listing_tickers(title):
+    """Tickers named in a listing headline: '(PNUT)', 'NEIROUSDT', '1000CATUSDT' -> PNUT, NEIRO, CAT."""
+    import re
+    found = set(re.findall(r"\(([A-Z0-9]{2,12})\)", title))
+    for pair in re.findall(r"\b([A-Z0-9]{2,15})USD[TC]?\b", title):
+        found.add(re.sub(r"^(1000000|1000)", "", pair))
+    return {t for t in found if t and not t.isdigit() and t not in FEED_TICKER_IGNORE}
+
+
+def _fetch_listings():
+    """[(source, id, title)] of recent NEW-listing announcements from Binance and Upbit."""
+    out = []
+    try:
+        d = http_json(BINANCE_LISTINGS)
+        for a in (((d.get("data") or {}).get("catalogs") or [{}])[0].get("articles") or []):
+            t = a.get("title", "")
+            if not any(w in t.lower() for w in LISTING_SKIP_WORDS):
+                out.append(("Binance", f"b{a.get('id')}", t))
+    except Exception as e:
+        log(f"listings: Binance unavailable ({type(e).__name__})")
+    try:
+        d = http_json(UPBIT_LISTINGS)
+        for n in ((d.get("data") or {}).get("notices") or []):
+            t = n.get("title", "")
+            if "신규 거래지원" in t:                      # "new trading support" = a new listing
+                out.append(("Upbit", f"u{n.get('id')}", t))
+    except Exception as e:
+        log(f"listings: Upbit unavailable ({type(e).__name__})")
+    return out
+
+
+async def listings_loop(state):
+    loop = asyncio.get_running_loop()
+    seen, first = set(), True
+    while True:
+        try:
+            for source, aid, title in await loop.run_in_executor(None, _fetch_listings):
+                if aid in seen:
+                    continue
+                seen.add(aid)
+                if first:                               # don't ping old announcements at startup
+                    continue
+                tickers = _listing_tickers(title)
+                log(f"listing: {source} - {title[:100]} | tickers: {', '.join(sorted(tickers)) or 'none'}")
+                for tick in tickers:
+                    same = [m for m in (metrics(p) for p in await loop.run_in_executor(None, dex_search, tick))
+                            if m["symbol"].replace("$", "").upper() == tick and m["liq"] >= 20_000]
+                    top = max(same, key=lambda m: m["vol_h24"], default=None)
+                    # the listed coin = the highest-volume coin with that ticker on ANY chain; only ping if that one
+                    # is on Solana/Base (30 Sep test: Binance's NEIRO is on Ethereum - a Solana "NEIRO" is a copy)
+                    if not top or top["chain"] not in CHAINS:
+                        log(f"listing: ${tick} - the real coin is " +
+                            (f"on {top['chain']}" if top else "not on a DEX") + ", not buyable in Coinbase - no ping")
+                        continue
+                    if top["mcap"] < LISTING_MIN_MCAP:    # exchanges list established coins; a tiny match is a copy
+                        log(f"listing: ${tick} - best Solana/Base match is only {fmt_usd(top['mcap'])}, "
+                            "probably a copy of a coin on another chain - no ping")
+                        continue
+                    best = top
+                    body = (f"{source} announced: {title[:220]}\n\n{best['name']} (${best['symbol']}) on {best['chain']}\n"
+                            f"CA: {best['addr']}\nMCap {fmt_usd(best['mcap'])} | Liq {fmt_usd(best['liq'])} | "
+                            f"1h {best['chg_h1']:+.0f}% | 5m {best['chg_m5']:+.0f}%\n"
+                            "Big-exchange listings often pump memecoins within minutes (2024: 80% of Binance's memecoin "
+                            "listings rose, ACT +1,000%). Highest-volume coin with this ticker shown - check the CA.")
+                    send_ntfy(f"LISTING: {source} -> ${best['symbol']} {fmt_usd(best['mcap'])}", body,
+                              click=coinbase_url(best), priority="urgent", tags="rotating_light,bank",
+                              actions=check_links(best))
+                    log_ping("LISTING", best, {"story": f"{source} listing", "listing": source})
+            first = False
+        except Exception as e:
+            log(f"listings loop error: {e}")
+        await asyncio.sleep(LISTING_POLL_SECONDS)
+
+
 def harvest_trump():
     try:
         phrases = set()
@@ -1515,6 +1606,7 @@ X_ACCOUNTS = [
     "toly",              # Toly (Anatoly Yakovenko), Solana co-founder - his memes move Solana coins
     "a1lon9",            # Alon, pump.fun co-founder
     "VladTenev",         # Robinhood CEO - following Super Inu's account was an early $SI signal
+    "MELANIATRUMP",      # launched $MELANIA herself (Jan 2025, +12,000% in 24h); posts rarely, so pennies a month
 ]
 # News aggregators: they break story-coin news first ("JUST IN: Vlad Tenev follows Super Inu $SI" came from
 # WhaleInsider hours before the big run). They post a lot (~$5-10/month each), so their posts only ping when they
@@ -2470,7 +2562,8 @@ async def main():
     await asyncio.gather(runners_loop(state), keywords_loop(state), graduations_loop(state),
                          smart_wallets_loop(state), sleepers_loop(state), x_vip_loop(state),
                          scorecard_loop(state), second_leg_loop(state),
-                         positions_loop(state), ignition_loop(state), nursery_loop(state), truth_ca_loop(state))
+                         positions_loop(state), ignition_loop(state), nursery_loop(state), truth_ca_loop(state),
+                         listings_loop(state))
 
 
 if __name__ == "__main__":
