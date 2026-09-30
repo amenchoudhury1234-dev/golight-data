@@ -440,14 +440,27 @@ def send_ntfy(title, body, click=None, priority="high", tags="rotating_light", a
 REJECTED = set()   # coins that failed safety checks (so a later ping isn't mislabelled as a re-alert)
 
 
+def coinbase_url(m):
+    """Link that opens the coin straight in the Coinbase app, ready for Buy & sell (tested 1 Oct on the user's
+    Android: Super Intelligence, Mr Crookshanks, Starship SpaceX Coin). Coinbase's own share links look like
+    coinbase.com/price/<name-slug>-solana-<contract in lowercase>-token. If the name has no plain letters/digits
+    (emoji, non-Latin) or the coin is on Base (format not tested), fall back to coinbase.com/price/<contract>,
+    which opens Coinbase's search with only that coin listed (one extra tap)."""
+    import re
+    slug = re.sub(r"[^a-z0-9]+", "-", (m.get("name") or "").lower()).strip("-")
+    if slug and m.get("chain") == "solana":
+        return f"https://www.coinbase.com/price/{slug}-solana-{m['addr'].lower()}-token"
+    return f"https://www.coinbase.com/price/{m['addr']}"
+
+
 def check_links(m):
-    """One-tap buttons on the phone notification: GMGN (fees/bundlers/insiders), chart, RugCheck."""
+    """One-tap buttons on the phone notification (ntfy allows 3): Buy on Coinbase, GMGN (fees/bundlers/insiders),
+    chart. The RugCheck summary is already in the notification text."""
     net = "sol" if m["chain"] == "solana" else m["chain"]
-    acts = [{"label": "GMGN", "url": f"https://gmgn.ai/{net}/token/{m['addr']}"}]
+    acts = [{"label": "Buy on Coinbase", "url": coinbase_url(m)},
+            {"label": "GMGN", "url": f"https://gmgn.ai/{net}/token/{m['addr']}"}]
     if m["url"]:
         acts.append({"label": "Chart", "url": m["url"]})
-    if m["chain"] == "solana":
-        acts.append({"label": "RugCheck", "url": f"https://rugcheck.xyz/tokens/{m['addr']}"})
     return acts
 
 
@@ -812,7 +825,7 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
         f"PLAN (lotto): only GBP20-50 you can lose completely - no stop, most winners dip 50-80% first. "
         f"Sell half at 2x. Add it to positions.txt for exit alerts."
     )
-    if send_ntfy(title, body, click=m["url"] or None, priority="urgent" if strong else "high",
+    if send_ntfy(title, body, click=coinbase_url(m), priority="urgent" if strong else "high",
                  tags="rotating_light,moneybag" if strong else "rotating_light", actions=check_links(m)):
         state.record(m["addr"], m["mcap"])
         log_ping(kind if not strong else "ACT NOW", m,
@@ -1630,7 +1643,9 @@ async def x_vip_loop(state):
                 for ca in re.findall(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", text):
                     send_ntfy(f"@{name} POSTED A CONTRACT ADDRESS", f"{text[:300]}\n\nCA: {ca}\n"
                               "Copycats appear within seconds - use ONLY this exact CA. Check GMGN first.",
-                              click=f"https://dexscreener.com/solana/{ca}", priority="urgent", tags="rotating_light")
+                              click=f"https://www.coinbase.com/price/{ca}", priority="urgent", tags="rotating_light",
+                              actions=[{"label": "Buy on Coinbase", "url": f"https://www.coinbase.com/price/{ca}"},
+                                       {"label": "Chart", "url": f"https://dexscreener.com/solana/{ca}"}])
                 if name in X_FEED_ACCOUNTS:
                     if AUTO is not None:
                         for ph in vip_phrases(text):
@@ -1669,7 +1684,7 @@ async def x_vip_loop(state):
                               f"{lines}\n\nThese haven't necessarily moved yet - this is the EARLIEST possible heads-up "
                               "(JIMOTHY did +331% after Elon's raccoon post). Only buy if volume starts jumping in the next "
                               "few minutes - no buyers = no move. Check GMGN, GBP20-50 max, half out at 2x.",
-                              click=top[0][1]["url"] or None, priority="urgent" if name in X_FAST_ACCOUNTS else "high",
+                              click=coinbase_url(top[0][1]), priority="urgent" if name in X_FAST_ACCOUNTS else "high",
                               tags="bird", actions=check_links(top[0][1]))
             await asyncio.sleep(0.2)
         await asyncio.sleep(1)
@@ -2058,7 +2073,7 @@ async def positions_loop(state):
                         if ev not in s["done"]:
                             s["done"].append(ev)
                             changed = True
-                            send_ntfy(title, body, click=m["url"] or None, priority="urgent",
+                            send_ntfy(title, body, click=coinbase_url(m), priority="urgent",
                                       tags="rotating_light,moneybag", actions=links)
 
                     status = f"${sym} is {x:.2f}x your cost | MCap {fmt_usd(m['mcap'])} | 5m {m['chg_m5']:+.0f}%"
@@ -2078,7 +2093,7 @@ async def positions_loop(state):
                         changed = True
                         send_ntfy(f"DUMP WARNING: ${sym} - sells 2x buys in the last 5 min",
                                   status + "\nInsiders may be exiting. Consider selling now.",
-                                  click=m["url"] or None, priority="urgent", tags="warning", actions=links)
+                                  click=coinbase_url(m), priority="urgent", tags="warning", actions=links)
                 if changed:
                     with open(os.path.join(HERE, POS_STATE_FILE), "w") as f:
                         json.dump(pst, f)
