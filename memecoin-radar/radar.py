@@ -1177,6 +1177,15 @@ X_ACCOUNTS = [
 ]
 # Optional (busy news accounts, each roughly +$10-15/month): "WhaleInsider", "WatcherGuru", "blknoiz06"
 X_POLL_SECONDS = 60
+# Words these accounts post about every day - a coin named after them doesn't get a surprise wave of buyers.
+# 30 Sep: Elon's "Starship Flight 14" post matched a $43K STARSHIP coin that didn't move at all.
+VIP_ROUTINE_WORDS = {
+    "elonmusk": {"starship", "spacex", "tesla", "grok", "xai", "falcon", "rocket", "mars", "neuralink", "optimus",
+                 "cybertruck", "dragon", "starlink", "boring", "flight", "launch", "physics", "moon", "telescopes"},
+    "realDonaldTrump": {"america", "american", "maga", "trump", "president", "great", "again", "border", "biden",
+                        "democrats", "election", "country"},
+}
+VIP_MATCH_MIN_VOL_H24 = 10_000   # a matching coin must already have some life, not a dead pool
 X_TOKEN_FILE = "x_token.txt"
 EMOJI_WORDS = {"🦝": "raccoon", "🐸": "frog", "🐕": "dog", "🐶": "dog", "🐈": "cat", "🐱": "cat", "🦛": "hippo",
                "🐿": "squirrel", "🐧": "penguin", "🦍": "gorilla", "🐂": "bull", "🦅": "eagle", "🐻": "bear",
@@ -1257,11 +1266,13 @@ async def x_vip_loop(state):
                     for ph in phrases:
                         AUTO.seen[ph] = now      # newest = searched first, every 3 minutes
                 matches = []
-                for ph in list(phrases)[:6]:
+                routine = VIP_ROUTINE_WORDS.get(name, set())
+                for ph in [p for p in phrases if not set(p.split()) <= routine][:6]:
                     for p in await loop.run_in_executor(None, dex_search, ph):
                         m = metrics(p)
                         if (m["chain"] in CHAINS and m["addr"] and coin_matches(ph, m)
-                                and m["liq"] >= 20_000 and m["mcap"] <= KEYWORD_MAX_MCAP):
+                                and m["liq"] >= 20_000 and m["mcap"] <= KEYWORD_MAX_MCAP
+                                and m["vol_h24"] >= VIP_MATCH_MIN_VOL_H24):
                             matches.append((ph, m))
                     await asyncio.sleep(1)
                 best = {}
@@ -1270,11 +1281,13 @@ async def x_vip_loop(state):
                         best[m["addr"]] = (ph, m)
                 top = sorted(best.values(), key=lambda x: -x[1]["vol_h24"])[:3]
                 if top:
-                    lines = "\n".join(f'- "{ph}" -> {m["name"]} ${m["symbol"]} {fmt_usd(m["mcap"])} | CA {m["addr"]}'
+                    lines = "\n".join(f'- "{ph}" -> {m["name"]} ${m["symbol"]} {fmt_usd(m["mcap"])} | vol 24h '
+                                      f'{fmt_usd(m["vol_h24"])} | 1h {m["chg_h1"]:+.0f}% | CA {m["addr"]}'
                                       for ph, m in top)
                     send_ntfy(f"@{name} just posted - matching coins", f'"{text[:200]}"\n\nExisting coins that match:\n'
                               f"{lines}\n\nThese haven't necessarily moved yet - this is the EARLIEST possible heads-up "
-                              "(JIMOTHY did +331% after Elon's raccoon post). Check GMGN, max GBP50-100, half out at 2x.",
+                              "(JIMOTHY did +331% after Elon's raccoon post). Only buy if volume starts jumping in the next "
+                              "few minutes - no buyers = no move. Check GMGN, GBP20-50 max, half out at 2x.",
                               click=top[0][1]["url"] or None, priority="high", tags="bird")
             await asyncio.sleep(1)
         await asyncio.sleep(X_POLL_SECONDS)
