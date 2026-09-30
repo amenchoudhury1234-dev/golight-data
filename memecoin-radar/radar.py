@@ -294,7 +294,13 @@ async def runners_loop(state):
                 for p in pairs.values():
                     m = metrics(p)
                     if is_early_runner(m):
-                        await loop.run_in_executor(None, alert, state, "EARLY RUNNER", m, "")
+                        story = real_world_match(m)
+                        if story:
+                            await loop.run_in_executor(None, alert, state, "RUNNER + REAL STORY", m,
+                                                       f'REAL-WORLD STORY: matches trending "{story}" - these run '
+                                                       f'longer than random coins (TILCAYO, Super Inu pattern).')
+                        else:
+                            await loop.run_in_executor(None, alert, state, "EARLY RUNNER", m, "")
             log(f"runner scan done ({sum(len(a) for a in latest.values())} fresh tokens checked)")
         except Exception as e:
             log(f"runner loop error: {e}")
@@ -452,6 +458,35 @@ def coin_matches(phrase, m):
     return False
 
 
+def harvest_polymarket_mentions():
+    """PREDICTION-MARKET EDGE: Polymarket 'mention markets' ("What will Trump say during X?") list the exact
+    words traders expect a VIP to say at an UPCOMING speech - before it happens. We load those words as
+    keywords ahead of time, so the moment a word is said the radar is already watching matching coins."""
+    import re
+    out = set()
+    try:
+        events = http_json("https://gamma-api.polymarket.com/events?closed=false&limit=300&order=volume&ascending=false")
+    except Exception as e:
+        log(f"polymarket unavailable: {e}")
+        return out
+    for ev in events or []:
+        title = str(ev.get("title", ""))
+        if not re.search(r"\b(say|says|mention|mentions)\b", title, re.I):
+            continue
+        for mk in ev.get("markets") or []:
+            word = mk.get("groupItemTitle") or ""
+            if not word:
+                q = re.findall(r'["“]([^"”]{2,40})["”]', str(mk.get("question", "")))
+                word = q[0] if q else ""
+            word = _clean(word).lower()
+            if 2 <= len(word) <= 40 and word not in STOP:
+                out.add(word)
+    return out
+
+
+AUTO = None  # shared AutoKeywords instance (runners loop uses it to tag real-world-backed coins)
+
+
 class AutoKeywords:
     def __init__(self):
         self.seen = {}        # phrase -> first-seen timestamp
@@ -466,6 +501,7 @@ class AutoKeywords:
         found |= harvest_trump()
         found |= harvest_google_trends()
         found |= harvest_wikipedia_spikes()
+        found |= harvest_polymarket_mentions()
         now = time.time()
         for ph in found:
             self.seen.setdefault(ph, now)
@@ -478,9 +514,21 @@ class AutoKeywords:
         return [k for k, _ in newest[:limit]]
 
 
+def real_world_match(m):
+    """Return the trending real-world phrase this coin matches, if any (Trump post / Google / Wikipedia /
+    Polymarket / AI routine). Coins backed by a real story tend to run longer than random pump.fun coins."""
+    if AUTO is None:
+        return None
+    for kw in AUTO.active(200):
+        if coin_matches(kw, m):
+            return kw
+    return None
+
+
 async def keywords_loop(state):
+    global AUTO
     loop = asyncio.get_running_loop()
-    auto = AutoKeywords()
+    auto = AUTO = AutoKeywords()
     while True:
         await loop.run_in_executor(None, auto.refresh)
         manual = load_keywords()

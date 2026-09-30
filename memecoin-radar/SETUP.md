@@ -40,6 +40,9 @@ The radar finds trending phrases **by itself** every 15 minutes, from:
 - **Google Trends:** what the US and UK are searching for right now.
 - **Wikipedia:** pages whose views suddenly spiked, such as a new animal or a person in the news.
 - **The hourly Claude "Catalyst watch":** its AI picks the memeable phrases from the news and sends them to your radar.
+- **Polymarket "mention markets":** bets on the exact words Trump will say at **upcoming** speeches. The radar loads those words **before** the speech, so it's already watching matching coins when he says them.
+
+If a new coin that's pumping also matches one of these real-world phrases, you get a **RUNNER + REAL STORY** ping. Those usually run longer than random coins.
 
 Every 3 minutes it checks each phrase for a Solana or Base coin with a **matching name or ticker** (including initials, e.g. "super intelligence" matches $SI) that is starting to move on real volume. Phrases expire after 48 hours.
 You don't need to touch `keywords.txt`. It's only there if you ever want to force a phrase in yourself.
