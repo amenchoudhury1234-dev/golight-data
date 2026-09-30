@@ -1353,6 +1353,15 @@ def vip_phrases(text):
     return {p for p in phrases if 2 <= len(p) <= 40}
 
 
+def _post_age_min(post):
+    try:
+        import calendar
+        t = calendar.timegm(time.strptime(post.get("created_at", "")[:19], "%Y-%m-%dT%H:%M:%S"))
+        return (time.time() - t) / 60
+    except Exception:
+        return 0
+
+
 async def feed_post_tickers(state, acct, text):
     """A news account named a $TICKER: find the live Solana/Base coin with that exact ticker and send it to the
     normal alert path (safety check + AI judge)."""
@@ -1407,6 +1416,12 @@ async def x_vip_loop(state):
     except Exception:
         pass
     log(f"X watch on for: {', '.join('@' + n for n in ids)}")
+    since_path = os.path.join(HERE, "x_since.json")  # resume from the last seen post: restarts cost no X reads
+    try:
+        with open(since_path) as f:
+            since.update({k: v for k, v in json.load(f).items() if k in ids})
+    except Exception:
+        pass
     while True:
         for name, uid in ids.items():
             q = "exclude=replies,retweets&tweet.fields=created_at&max_results=5"
@@ -1422,8 +1437,14 @@ async def x_vip_loop(state):
                 continue
             first_run = name not in since
             since[name] = posts[0]["id"]
+            try:
+                with open(since_path, "w") as f:
+                    json.dump(since, f)
+            except Exception:
+                pass
             if first_run:            # don't act on old posts at startup
                 continue
+            posts = [p for p in posts if _post_age_min(p) <= 120]   # after a long outage, skip stale posts
             for post in posts:
                 text = post.get("text", "")
                 log(f"@{name} posted: {text[:80]!r}")
