@@ -91,6 +91,14 @@ On 30 Sep, every price-only ping we could check fell 30% before reaching 2x, and
 
 Price-only coins are still tracked silently on paper and shown in the 21:00 scorecard. To get those pings back, set `NARRATIVE_MODE = False` in `radar.py`.
 
+## AI check (Claude Opus 5.5)
+Before a phone ping, the radar sends the coin's numbers and its story to Claude Opus 5.5, which answers **PING** or **SKIP** with a one-line reason.
+- Pings that pass start with **"AI OK"** and include the reason and the main risk.
+- SKIPs are silent but still paper-traded. The 21:00 scorecard compares what the AI passed with what it skipped, and shows today's cost.
+- **Cost:** about 1–3p per check, capped at 80 checks a day (`AI_MAX_CALLS_PER_DAY`). With narrative mode it's usually 5–15 checks a day, about £3–7 a month.
+- **Setup:** run `pip install anthropic`, then paste your API key from console.anthropic.com into `anthropic_key.txt` (private; never share or commit it). Use prepaid credit with auto-reload **off**.
+- If there's no key, or the AI is down, the radar pings exactly as before.
+
 ## IGNITION pings (catching the START of a move)
 Earlier pings needed +50% in the hour, so they arrived after the move (SGI at $151K, HERO/SARKA on a bounce inside a dump). The radar now also:
 - watches **every new pump.fun launch**, every migration, and GeckoTerminal's "trending in the last 5 minutes"

@@ -4,3 +4,5 @@ pings_log.json
 positions_state.json
 pings_export.csv
 __pycache__/
+anthropic_key.txt
+ai_usage.json

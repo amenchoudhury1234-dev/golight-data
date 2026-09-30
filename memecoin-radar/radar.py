@@ -464,6 +464,168 @@ def story_coin_symbols():
     return out
 
 
+# ----------------------------- AI JUDGE (Claude Opus 5.5 second opinion) -----------------------------
+# The rules above are fast but can't "see" that a coin already ran, is a caller pump or a weak copy. Before a
+# phone ping, the coin's numbers + its story go to Claude, which answers PING or SKIP with a one-line reason.
+# SKIPs are silent but still paper-traded, so the scorecard shows whether the judge actually helps.
+# Needs: pip install anthropic, and your API key in anthropic_key.txt (private, never commit it).
+# No key file = judge off and pings work exactly as before.
+AI_KEY_FILE = "anthropic_key.txt"
+AI_MODEL = "claude-opus-5-5"
+AI_EFFORT = "medium"
+AI_MAX_CALLS_PER_DAY = 80          # hard guard on spend (~2-3p per call)
+AI_USAGE_FILE = "ai_usage.json"
+AI_PRICE_IN, AI_PRICE_OUT = 4.00, 20.00   # $ per million tokens (Opus 5.5)
+RECENT_VIP = []                    # (time, account, text) from the X watch, fed to the judge
+_AI = {"client": None, "tried": False, "lock": threading.Lock()}
+
+JUDGE_SYSTEM = """You are the final filter for a UK beginner's memecoin alert radar. They buy Solana/Base coins by hand
+in the Coinbase app (1-3 minutes to get in), with GBP20-50 per coin they can afford to lose completely: no stop,
+sell half at 2x, sell the rest 50% off the peak. A phone ping should mean "worth a look right now".
+
+Answer PING only if an early, still-developing move with a real reason to keep running is plausible; otherwise
+SKIP. What the user's own data (30 Sep 2026) showed:
+- Pure price spikes pinged near the top: 5 of 11 peaked within 3 minutes of the ping. Late = +150%+ in the hour
+  with no fresh catalyst, a single vertical 5-min candle, or mcap already many times where the story started.
+- Winners had a real story or huge organic activity: a Trump-phrase coin ("super intelligence" -> $SI) at $1.01M
+  did 7.2x in 3h; CROOK (2,200+ buys/hour, big volume) did 7x after first dipping 80%.
+- Coins pinged in the first minutes after migrating off pump.fun, or while down on the hour (dead-cat bounce),
+  went to ~0. Tiny copies of a story coin died; a copy with far more volume than rivals ran.
+- Red flags: sells rising vs buys, thin liquidity vs mcap (<5%), insider/holder warnings, no socials, a story
+  that is days old, a phrase that only loosely matches the coin name, caller/bundle-driven pumps.
+Judge only from the data given; say so if something important is missing. Be decisive and brief."""
+
+JUDGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["PING", "SKIP"]},
+        "confidence": {"type": "integer", "enum": [1, 2, 3, 4, 5]},
+        "reason": {"type": "string", "description": "One sentence, max 25 words, plain English."},
+        "main_risk": {"type": "string", "description": "Biggest risk in max 12 words."},
+    },
+    "required": ["verdict", "confidence", "reason", "main_risk"],
+    "additionalProperties": False,
+}
+
+
+def _ai_client():
+    with _AI["lock"]:
+        if not _AI["tried"]:
+            _AI["tried"] = True
+            try:
+                with open(os.path.join(HERE, AI_KEY_FILE), encoding="utf-8") as f:
+                    key = f.read().strip()
+                import anthropic
+                _AI["client"] = anthropic.Anthropic(api_key=key, timeout=60, max_retries=1)
+                log(f"AI judge on ({AI_MODEL}, max {AI_MAX_CALLS_PER_DAY} checks/day)")
+            except FileNotFoundError:
+                log("AI judge off: put your Anthropic API key in anthropic_key.txt to turn it on")
+            except ImportError:
+                log("AI judge off: run  pip install anthropic")
+        return _AI["client"]
+
+
+def _ai_usage(add_in=0, add_out=0):
+    """Track calls and $ per day in ai_usage.json. Returns today's record."""
+    path, day = os.path.join(HERE, AI_USAGE_FILE), datetime.now().strftime("%Y-%m-%d")
+    try:
+        with open(path) as f:
+            u = json.load(f)
+    except Exception:
+        u = {}
+    rec = u.setdefault(day, {"calls": 0, "usd": 0.0})
+    if add_in or add_out:
+        rec["calls"] += 1
+        rec["usd"] = round(rec["usd"] + (add_in * AI_PRICE_IN + add_out * AI_PRICE_OUT) / 1e6, 4)
+        try:
+            with open(path, "w") as f:
+                json.dump(u, f)
+        except Exception:
+            pass
+    return rec
+
+
+def _coin_brief(kind, m, extra, rc_notes, flags):
+    now = time.time()
+    story = (flags or {}).get("story") or (flags or {}).get("keyword") or ""
+    lines = [
+        f"Ping type: {kind}",
+        f"Coin: {m['name']} (${m['symbol']}) on {m['chain']}, dex {m['dex'] or '?'}"
+        f"{' (still on pump.fun bonding curve)' if on_bonding_curve(m) else ''}",
+        f"Market cap {fmt_usd(m['mcap'])} | liquidity {fmt_usd(m['liq'])} | pool age {m['age_h']:.1f}h | "
+        f"socials listed: {'yes' if m['has_social'] else 'no'}",
+        f"Price change: 5m {m['chg_m5']:+.0f}% | 1h {m['chg_h1']:+.0f}% | 6h {m['chg_h6']:+.0f}%",
+        f"Volume: 5m {fmt_usd(m['vol_m5'])} | 1h {fmt_usd(m['vol_h1'])} | 24h {fmt_usd(m['vol_h24'])}",
+        f"Buys/sells: 5m {m['buys_m5']}/{m['sells_m5']} | 1h {m['buys_h1']}/{m['sells_h1']}",
+        f"Safety check: {rc_notes}",
+    ]
+    if story:
+        age = ""
+        if AUTO is not None and story in AUTO.seen:
+            age = f" (radar first saw this phrase trending {(now - AUTO.seen[story]) / 3600:.1f}h ago)"
+        lines.append(f'Matched real-world phrase: "{story}"{age}')
+    snaps = SNAPS.get(m["addr"]) or []
+    if len(snaps) >= 3:
+        pts = [f"{(now - t) / 60:.0f}m ago {p / m['price']:.2f}x" for t, p in snaps[-8:] if m["price"]]
+        lines.append("Radar's own price history vs now: " + ", ".join(pts))
+    prev = [p for p in _load_pings() if p.get("addr") == m["addr"]]
+    if prev:
+        lines.append(f"Seen by the radar {len(prev)} time(s) before, first at {fmt_usd(prev[0]['mcap'])} "
+                     f"{(now - prev[0]['t']) / 3600:.1f}h ago")
+    vip = [f"@{a} {(now - t) / 3600:.1f}h ago: {txt[:200]}" for t, a, txt in RECENT_VIP[-8:] if now - t < 24 * 3600]
+    if vip:
+        lines.append("Recent VIP X posts:\n" + "\n".join(vip))
+    if extra.strip():
+        lines.append("Radar notes: " + extra.strip()[:600])
+    return "\n".join(lines)
+
+
+def ai_judge(kind, m, extra, rc_notes, flags):
+    """Returns dict(verdict, confidence, reason, main_risk) or None if the judge is off/unavailable."""
+    client = _ai_client()
+    if client is None:
+        return None
+    if _ai_usage()["calls"] >= AI_MAX_CALLS_PER_DAY:
+        log("AI judge: daily cap reached - pinging without it")
+        return None
+    import anthropic
+    req = dict(model=AI_MODEL, max_tokens=4000, system=JUDGE_SYSTEM,
+               output_config={"effort": AI_EFFORT, "format": {"type": "json_schema", "schema": JUDGE_SCHEMA}},
+               messages=[{"role": "user", "content": _coin_brief(kind, m, extra, rc_notes, flags)}])
+    try:
+        try:
+            resp = client.beta.messages.create(betas=["server-side-fallback-2026-07-01"], fallbacks="default", **req)
+        except (anthropic.BadRequestError, TypeError) as e:
+            if "fallback" not in str(e).lower() and "betas" not in str(e).lower():
+                raise
+            resp = client.messages.create(**req)   # fallback parameter not accepted on this account/SDK
+    except anthropic.AuthenticationError:
+        log("AI judge: API key rejected - check anthropic_key.txt")
+        return None
+    except anthropic.APIStatusError as e:
+        log(f"AI judge error {e.status_code}: {str(e)[:120]}")
+        return None
+    except anthropic.APIConnectionError as e:
+        log(f"AI judge unreachable: {e}")
+        return None
+    except Exception as e:                      # never let the judge block a ping
+        log(f"AI judge failed ({type(e).__name__}: {str(e)[:120]}) - pinging without it")
+        return None
+    rec = _ai_usage(resp.usage.input_tokens, resp.usage.output_tokens)
+    if resp.stop_reason == "refusal":
+        log("AI judge declined this one - pinging without it")
+        return None
+    text = next((b.text for b in resp.content if b.type == "text"), "")
+    try:
+        out = json.loads(text)
+    except ValueError:
+        log(f"AI judge: unreadable answer {text[:80]!r}")
+        return None
+    log(f"AI judge ${m['symbol']}: {out['verdict']} ({out['confidence']}/5) {out['reason']} "
+        f"[today {rec['calls']} checks, ${rec['usd']:.2f}]")
+    return out
+
+
 def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     real = story_coin_symbols().get(m["symbol"].lstrip("$").upper())
     if real and real != m["addr"]:
@@ -510,12 +672,25 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
                  "migration). Lottery size only, or wait for it to migrate and hold 45+ min.\n" + extra)
     if not verified:
         extra = "SAFETY UNVERIFIED - check GMGN (bundlers/insiders/top10) before anything.\n" + extra
+    verdict = ai_judge("ACT NOW" if strong else kind, m, extra, rc_notes, flags)
+    flags = dict(flags or {})
+    if verdict:
+        flags.update(ai=verdict["verdict"], ai_conf=verdict["confidence"])
+        if verdict["verdict"] == "SKIP":
+            state.alerted[m["addr"]] = m["mcap"]      # don't re-judge it until it doubles
+            state.save()
+            log_candidate(kind, m, False, [f"AI skip: {verdict['reason'][:80]}"], flags)
+            return
+        extra = (f"AI CHECK: worth a look ({verdict['confidence']}/5) - {verdict['reason']} "
+                 f"Main risk: {verdict['main_risk']}\n" + extra)
     if strong:
         title = f"ACT NOW (10-min window): ${m['symbol']} {fmt_usd(m['mcap'])} {m['chg_h1']:+.0f}% 1h"
         extra = ("STRONG SETUP: buyers heavily outnumber sellers on big volume. If GMGN checks pass, "
-                 "enter GBP50-100 now; don't wait for it to 'confirm'.\n" + extra)
+                 "enter GBP20-50 now; don't wait for it to 'confirm'.\n" + extra)
     else:
         title = f"{kind}: ${m['symbol']} {fmt_usd(m['mcap'])} ({m['chg_h1']:+.0f}% 1h)"
+    if verdict:
+        title = "AI OK " + title
     body = (
         f"{m['name']} (${m['symbol']}) on {m['chain']}\n"
         f"CA: {m['addr']}\n"
@@ -530,7 +705,7 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
                  tags="rotating_light,moneybag" if strong else "rotating_light", actions=check_links(m)):
         state.record(m["addr"], m["mcap"])
         log_ping(kind if not strong else "ACT NOW", m,
-                 dict({"verified": verified, "insider_warn": "WARN" in rc_notes}, **(flags or {})))
+                 dict({"verified": verified, "insider_warn": "WARN" in rc_notes}, **flags))
 
 
 # ----------------------------- loops -----------------------------
@@ -1061,6 +1236,8 @@ async def x_vip_loop(state):
             for post in posts:
                 text = post.get("text", "")
                 log(f"@{name} posted: {text[:80]!r}")
+                RECENT_VIP.append((time.time(), name, text))
+                del RECENT_VIP[:-30]
                 # 1) VIP named a contract address directly -> immediate urgent ping
                 for ca in re.findall(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", text):
                     send_ntfy(f"@{name} POSTED A CONTRACT ADDRESS", f"{text[:300]}\n\nCA: {ca}\n"
@@ -1330,6 +1507,16 @@ def scorecard_text(hours=24):
         if blocked:
             L.append("Filters that blocked the 2x ones: " +
                      ", ".join(f"{r} x{n}" for r, n in sorted(blocked.items(), key=lambda kv: -kv[1])[:5]))
+    judged = [p for p in allp if (p.get("f") or {}).get("ai")]
+    if judged:
+        for v in ("PING", "SKIP"):
+            grp = [p for p in judged if p["f"]["ai"] == v]
+            if grp:
+                L.append(f"AI {'passed' if v == 'PING' else 'skipped'}: {len(grp)} | hit 2x: "
+                         f"{sum((p.get('peak_x') or 0) >= 2 for p in grp)} | lotto result "
+                         f"{_gbp(sum(_pnl(p, 'lotto') or 0 for p in grp))}")
+        u = _ai_usage()
+        L.append(f"AI cost today: {u['calls']} checks, ${u['usd']:.2f}")
     best = sorted(pings, key=lambda p: -(p.get("peak_x") or 0))[:3]
     if best:
         L.append("Best: " + "; ".join(f"{p['kind']} ${p['symbol']} peak {p.get('peak_x', 1):.1f}x "
