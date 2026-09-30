@@ -213,6 +213,8 @@ MAX_DEV_PCT = 10            # creator's own holding
 MAX_TRANSFER_FEE_PCT = 10
 HARD_REJECT_RISKS = ("creator history of rugged", "single holder ownership", "top 10 holders high ownership",
                      "honeypot", "freeze authority", "mint authority")
+MIN_LP_LOCKED_PCT = 80      # 30 Sep: $si16z ("super intelligence") ran $10K -> $120K in 15 min on a Meteora pool with
+                            # 0% of its liquidity locked; the creator pulled it right at our ping (liquidity -> $60).
 _rc_cache = {}
 
 
@@ -257,6 +259,16 @@ def rugcheck(mint):
         reasons.append(f"top-10 hold {top10:.0f}%")
     if dev_pct > MAX_DEV_PCT:
         reasons.append(f"dev holds {dev_pct:.0f}%")
+    # Pullable liquidity: no pool with locked/burned LP (pump.fun migrations burn it) AND almost no independent LP
+    # providers. The real $SI (9aqm..., 8x from our ping) has a burned-LP pumpswap pool + many Meteora LPs = fine;
+    # $si16z had one Meteora pool, 0% locked, 0-1 providers = the creator pulled it.
+    markets = [mk for mk in (r.get("markets") or []) if isinstance(mk, dict)]
+    safe_pool = any(float(((mk.get("lp") or {}).get("lpLockedPct")) or 0) >= MIN_LP_LOCKED_PCT
+                    or "pump" in str(mk.get("marketType", "")).lower() for mk in markets)
+    few_lps = int(r.get("totalLPProviders") or 0) <= 1 or any("lp providers" in str(x.get("name", "")).lower()
+                                                               for x in (r.get("risks") or []))
+    if markets and not safe_pool and few_lps:
+        reasons.append("liquidity not locked and only 1 LP provider - the dev can pull it (rug)")
     fee = float(((r.get("transferFee") or {}).get("pct")) or 0)
     if fee > MAX_TRANSFER_FEE_PCT:
         reasons.append(f"transfer fee {fee:.0f}%")
