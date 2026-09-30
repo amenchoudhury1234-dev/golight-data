@@ -1,0 +1,6 @@
+# Catalyst keywords - one per line. The radar searches these every 3 minutes
+# and pings you if a Solana/Base coin matching one starts moving on real volume.
+# Add a phrase the moment Trump/Elon/etc. say something memeable. Delete old ones.
+super intelligence
+super inu
+tilcayo
