@@ -42,10 +42,13 @@ RUNNER_MIN_H1_BUYS = 100          # real crowd, not 5 wallets
 RUNNER_MIN_LIQUIDITY = 8_000      # $ in the pool
 RUNNER_MIN_AGE_MINUTES = 20       # snipers dump ~85% within 5 min of launch - let that pass
 RUNNER_MIN_M5_CHANGE_ALLOWED = -10  # skip coins falling hard in the last 5 minutes
+RUNNER_MAX_H1_CHANGE = 250        # 30 Sep: SGI +196%, SAID +194%, e/acc +825% pinged after the move
+RUNNER_MAX_M5_CHANGE = 80         # PATTY pinged on a single +142% 5-min candle
 
 # Graduation rules (pump.fun coins that just migrated)
 GRAD_RECHECK_MINUTES = 45         # must SURVIVE this long after migration (GOCARDS died in 15 min)
 GRAD_MIN_MCAP = 80_000            # still above the ~$69K migration point after the wait
+GRAD_MAX_MCAP = 2_000_000         # IOF pinged "graduated" at $12M after +23,943% - nothing early left
 
 # Keyword rules (catalyst phrases)
 KEYWORD_FILE = "keywords.txt"
@@ -336,6 +339,10 @@ def runner_reasons(m):
         r.append("falling 5m")
     if dumping_now(m):
         r.append("5m dump")
+    if m["chg_h1"] > RUNNER_MAX_H1_CHANGE:
+        r.append("already ran")
+    if m["chg_m5"] > RUNNER_MAX_M5_CHANGE:
+        r.append("candle already vertical")
     if m["chg_h1"] < 0:
         r.append("dead-cat bounce")   # HERO (-31% 1h, +28% 5m) and SARKA (-24% 1h): a bounce inside a dump
     if not m["has_social"]:
@@ -400,7 +407,32 @@ def check_links(m):
     return acts
 
 
+def story_coin_symbols():
+    """{TICKER: real contract} from sleepers.txt comments like '# Super Inu $SI - ...'."""
+    out = {}
+    try:
+        with open(os.path.join(HERE, SLEEPER_FILE), encoding="utf-8") as f:
+            for ln in f:
+                ca, _, note = ln.partition("#")
+                ca = ca.strip()
+                if not ca:
+                    continue
+                words = note.split()
+                syms = {w.lstrip("$").upper() for w in words if w.startswith("$")}
+                if not syms and words:          # no $TICKER in the note -> first word is the ticker (JIMOTHY)
+                    syms.add(words[0].upper())
+                for sym in syms:
+                    out[sym] = ca
+    except FileNotFoundError:
+        pass
+    return out
+
+
 def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
+    real = story_coin_symbols().get(m["symbol"].lstrip("$").upper())
+    if real and real != m["addr"]:
+        log(f"skipped copycat ${m['symbol']} ({m['addr'][:6]}...) - the real story coin is {real[:6]}...")
+        return
     prev = state.alerted.get(m["addr"])
     if not skip_dedupe and not state.should_alert(m["addr"], m["mcap"]):
         return
@@ -424,7 +456,7 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     # migration (the new pool's age) - GOCARDS dumped -96% within 15 min of migrating. Never on late re-alerts.
     strong = (verified and not on_bonding_curve(m) and m["age_h"] * 60 >= 45 and kind != "RE-ALERT (doubled)"
               and m["chg_h1"] >= 100 and m["chg_m5"] >= 0 and m["buys_h1"] >= 1.5 * max(m["sells_h1"], 1)
-              and m["vol_h1"] >= 50_000 and m["mcap"] <= 1_000_000)
+              and m["chg_h1"] <= 300 and m["vol_h1"] >= 50_000 and m["mcap"] <= 1_000_000)
     if not strong and not state.under_cap():          # the hourly cap never blocks an ACT NOW
         log(f"hourly alert cap reached, skipping {m['symbol']}")
         log_candidate(kind, m, False, ["hourly cap"])
@@ -785,7 +817,7 @@ async def graduations_loop(state):
         m = metrics(p)
         if p15 and m["price"] < 0.7 * p15:      # gave back >30% since the 15-min mark -> insiders exiting
             return
-        if (m["mcap"] >= GRAD_MIN_MCAP and m["chg_m5"] >= 0 and not dumping_now(m) and m["buys_h1"] >= m["sells_h1"]
+        if (GRAD_MIN_MCAP <= m["mcap"] <= GRAD_MAX_MCAP and m["chg_h1"] <= 500 and m["chg_m5"] >= 0 and not dumping_now(m) and m["buys_h1"] >= m["sells_h1"]
                 and m["vol_h1"] >= RUNNER_MIN_H1_VOLUME and m["liq"] >= RUNNER_MIN_LIQUIDITY):
             await loop.run_in_executor(None, alert, state, "GRADUATED & HOLDING", m,
                                        f"Migrated off pump.fun ~{GRAD_RECHECK_MINUTES} min ago and still holding. "
