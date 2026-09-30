@@ -477,7 +477,7 @@ AI_MAX_CALLS_PER_DAY = 80          # hard guard on spend (~2-3p per call)
 AI_USAGE_FILE = "ai_usage.json"
 AI_DEEP_MAX_PER_DAY = 8            # live web cross-checks (~10-20p each: up to 3 searches + reading results)
 AI_DEEP_SEARCHES = 3
-AI_DAILY_BUDGET_USD = 0.60         # hard daily $ cap for all AI checks (max ~$18/month); over it = plain pings
+AI_DAILY_BUDGET_USD = 0.50         # hard daily $ cap for all AI checks (max ~$15/month = your account limit)
 AI_DEEP_RESERVE_USD = 0.20         # a web cross-check only starts if this much of today's budget is left
 AI_PRICE_SEARCH = 0.01             # $ per web search
 AI_PRICE_IN, AI_PRICE_OUT = 4.00, 20.00   # $ per million tokens (Opus 5.5)
@@ -948,15 +948,18 @@ def harvest_google_trends():
     return phrases
 
 
-REDDIT_FEEDS = ["https://www.reddit.com/r/all/top/.rss?t=hour", "https://www.reddit.com/r/aww/top/.rss?t=day",
-                "https://www.reddit.com/r/nextfuckinglevel/top/.rss?t=day"]
+REDDIT_FEEDS = ["https://www.reddit.com/r/all/top/.rss?t=hour"]
+REDDIT_EXTRA = ["https://www.reddit.com/r/aww/top/.rss?t=day", "https://www.reddit.com/r/nextfuckinglevel/top/.rss?t=day"]
+_REDDIT_TURN = [0]
 
 
 def harvest_reddit():
     """Viral posts (animals, clips, memes) often become coins hours later - Jimothy the raccoon was a viral clip."""
     import re
     phrases = set()
-    for i, url in enumerate(REDDIT_FEEDS):
+    _REDDIT_TURN[0] += 1
+    feeds = REDDIT_FEEDS + [REDDIT_EXTRA[_REDDIT_TURN[0] % len(REDDIT_EXTRA)]]
+    for i, url in enumerate(feeds):
         if i:
             time.sleep(4)                      # Reddit returns 429 when feeds are fetched back to back
         try:
@@ -1459,19 +1462,36 @@ async def x_vip_loop(state):
             since.update({k: v for k, v in json.load(f).items() if k in ids})
     except Exception:
         pass
+    hb = {"t": time.time(), "polls": 0, "posts": 0, "errors": 0, "last_err": "", "last_post": time.time(),
+          "warned": False}
     while True:
+        if time.time() - hb["t"] >= 30 * 60:        # heartbeat every 30 min so you can see it's alive
+            log(f"X watch alive: {hb['polls']} polls, {hb['posts']} new posts, {hb['errors']} errors in 30 min"
+                + (f" (last error: {hb['last_err'][:80]})" if hb["errors"] else ""))
+            hb.update(t=time.time(), polls=0, posts=0, errors=0, last_err="")
+        if time.time() - hb["last_post"] > 3 * 3600 and not hb["warned"]:
+            hb["warned"] = True                        # 8 accounts incl. WatcherGuru never go 3h silent
+            send_ntfy("X watch may be stuck", "No new post from any of the watched X accounts for 3 hours. "
+                      "Check console.x.com credit/usage and the radar log for 'X error'.", priority="default",
+                      tags="warning")
         for name, uid in ids.items():
             q = "exclude=replies,retweets&tweet.fields=created_at&max_results=5"
             if since.get(name):
                 q += f"&since_id={since[name]}"
+            hb["polls"] += 1
             try:
                 res = await loop.run_in_executor(None, x_get, f"users/{uid}/tweets?{q}", token)
             except Exception as e:
                 log(f"X error @{name}: {e}")
+                hb["errors"] += 1
+                hb["last_err"] = str(e)
                 continue
             posts = res.get("data") or []
             if not posts:
                 continue
+            hb["posts"] += len(posts)
+            hb["last_post"] = time.time()
+            hb["warned"] = False
             first_run = name not in since
             since[name] = posts[0]["id"]
             try:
@@ -2018,7 +2038,7 @@ def story_launch_match(name, symbol):
                     return ph, f"@{acct} post {(now - t) / 60:.0f} min ago"
     if AUTO is not None:
         for kw in AUTO.active(200):
-            if len(kw) >= 5 and _launch_matches(kw, lite):
+            if len(kw) >= 5 and _launch_matches(kw, lite) and story_backing({"story": kw})[2]:
                 return kw, "trending phrase"
     return None
 
