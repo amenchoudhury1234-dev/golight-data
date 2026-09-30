@@ -96,6 +96,7 @@ Every new pump.fun coin is checked the moment it's created. If its name or ticke
 
 ## More sources (added 30 Sep)
 - **@WhaleInsider and @WatcherGuru on X:** news accounts that often report story coins first ("Vlad Tenev follows Super Inu $SI" came from WhaleInsider hours before the big run). They only ping when they name a **$TICKER** that's a live Solana/Base coin (**NEWS MENTION**), and it still goes through the safety check and the AI check. Cost: roughly $5–10 a month each in X credit.
+- **Google News:** US top stories, anything Trump in the last 2 hours, and viral/typo/gaffe stories, every 10 minutes. A phrase reported by **2+ different outlets** counts as a strong, cross-referenced story. It's there for cases like 30 Sep's "President of the Unites States" typo coin (~260x), which we only heard about hours late.
 - **Reddit:** the hottest posts on r/all, r/aww and r/nextfuckinglevel feed the phrase list, because viral animals and clips often become coins hours later.
 - **Automatic second-wave watch:** any story coin that does 3x+ is added to `auto_sleepers.txt` and watched like Jimothy for a second wave. Delete a line to stop watching it.
 

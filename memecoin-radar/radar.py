@@ -894,9 +894,10 @@ def extract_phrases(text):
     """Pull memeable candidates from a post: quoted phrases, ALL-CAPS words, Capitalised 1-3 word phrases."""
     import re
     out = set()
-    for q in re.findall(r'["“]([^"”]{3,40})["”]', text):
+    for q in re.findall(r'["“‘]([^"”’]{3,40})["”’]|(?<!\w)\'([^\']{3,40})\'(?!\w)', text):
+        q = q[0] or q[1] if isinstance(q, tuple) else q
         q = _clean(q)
-        if 1 <= len(q.split()) <= 4:
+        if 1 <= len(q.split()) <= 6:
             out.add(q.lower())
     for w in re.findall(r"\b[A-Z]{4,15}\b", text):          # Trump-style CAPS words
         if w.lower() not in STOP:
@@ -964,6 +965,39 @@ def harvest_reddit():
         except Exception as e:
             log(f"reddit feed unavailable ({url.split('/r/')[1].split('/')[0]}): {e}")
     return phrases
+
+
+NEWS_FEEDS = [
+    "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",                                   # US top stories
+    "https://news.google.com/rss/search?q=Trump+when:2h&hl=en-US&gl=US&ceid=US:en",            # anything Trump, last 2h
+    "https://news.google.com/rss/search?q=viral+OR+typo+OR+gaffe+when:3h&hl=en-US&gl=US&ceid=US:en",
+]
+
+
+def harvest_news():
+    """Google News headlines. 30 Sep: the White House 'President of the Unites States' typo (TechCrunch/Newsweek)
+    turned a pump.fun coin into a ~260x; our radar only heard about it from the 2-hourly routine, far too late.
+    Returns {phrase: set(outlets)} so a phrase in 2+ different outlets counts as a strong, cross-referenced story."""
+    import re
+    import xml.etree.ElementTree as ET
+    out = {}
+    for i, url in enumerate(NEWS_FEEDS):
+        if i:
+            time.sleep(2)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA["User-Agent"]})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                root = ET.fromstring(r.read())
+        except Exception as e:
+            log(f"news feed unavailable: {e}")
+            continue
+        for it in list(root.iter("item"))[:40]:
+            title = it.findtext("title") or ""
+            outlet = (it.findtext("source") or title.rsplit(" - ", 1)[-1]).strip().lower()
+            title = title.rsplit(" - ", 1)[0]
+            for ph in extract_phrases(title):
+                out.setdefault(ph, set()).add(outlet)
+    return out
 
 
 def harvest_wikipedia_spikes():
@@ -1058,8 +1092,8 @@ def harvest_polymarket_mentions():
 AUTO = None  # shared AutoKeywords instance (runners loop uses it to tag real-world-backed coins)
 
 
-STRONG_SOURCES = {"trump", "ai-routine", "polymarket", "x-vip", "x-news", "manual"}
-WEAK_SOURCES = {"reddit", "google", "wikipedia"}   # need a second, independent source before they count
+STRONG_SOURCES = {"trump", "ai-routine", "polymarket", "x-vip", "x-news", "manual", "news-multi"}
+WEAK_SOURCES = {"reddit", "google", "wikipedia", "news"}   # need a second, independent source before they count
 
 
 class AutoKeywords:
@@ -1084,7 +1118,7 @@ class AutoKeywords:
         return out
 
     def refresh(self):
-        if time.time() - self.last_harvest < 15 * 60:
+        if time.time() - self.last_harvest < 10 * 60:
             return
         self.last_harvest = time.time()
         now = time.time()
@@ -1095,6 +1129,9 @@ class AutoKeywords:
             for ph in fn():
                 self.add(ph, source, now)
                 found.add(ph)
+        for ph, outlets in harvest_news().items():
+            self.add(ph, "news-multi" if len(outlets) >= 2 else "news", now)
+            found.add(ph)
         cutoff = now - AUTO_KEYWORD_TTL_HOURS * 3600
         self.seen = {k: v for k, v in self.seen.items() if v >= cutoff}
         self.src = {k: v for k, v in self.src.items() if max(v.values()) >= cutoff}
