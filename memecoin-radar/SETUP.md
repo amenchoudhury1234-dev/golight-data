@@ -66,6 +66,9 @@ Want more accounts, like WhaleInsider or WatcherGuru? Add them to `X_ACCOUNTS` i
 ## Sleeper coins (second waves)
 `sleepers.txt` lists "story coins" (Jimothy, Super Inu, Tilcayo, Rizzmas). These often pump **again** when a big account reposts their story without naming the coin. JIMOTHY did +331% after Elon posted a raccoon video. The radar checks them every minute and sends a **SLEEPER WAKING** ping when trading suddenly jumps. I'll add new story coins to the file as they appear.
 
+## Daily scorecard (automatic)
+The radar logs every ping and re-checks each coin over the next 24 hours: its peak, and its price after 1h, 6h and 24h. **Every evening at 21:00** you get a "Radar daily scorecard" ping showing how many pings hit 2x or 5x and how many died. You can also see it any time by running `python radar.py --scorecard` in the radar folder. Send the scorecard to Claude so the filters get tuned from real results.
+
 ## When it pings
 1. Open the DexScreener link in the notification.
 2. On GMGN, check that **global fees are at least 1.5 SOL** and that bundlers and snipers are low.

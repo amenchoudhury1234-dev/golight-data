@@ -205,6 +205,7 @@ def metrics(p):
         "buys_h1": int(h1.get("buys") or 0),
         "sells_h1": int(h1.get("sells") or 0),
         "age_h": age_h,
+        "price": float(p.get("priceUsd") or 0),
     }
 
 
@@ -288,6 +289,7 @@ def alert(state, kind, m, extra=""):
     if send_ntfy(title, body, click=m["url"] or None, priority="urgent" if strong else "high",
                  tags="rotating_light,moneybag" if strong else "rotating_light"):
         state.record(m["addr"], m["mcap"])
+        log_ping(kind if not strong else "ACT NOW", m)
 
 
 # ----------------------------- loops -----------------------------
@@ -835,14 +837,111 @@ async def sleepers_loop(state):
         await asyncio.sleep(POLL_SECONDS)
 
 
+# ----------------------------- SCORECARD (learning loop) -----------------------------
+# Every ping is logged; the radar re-checks each coin's price over the next 24h (peak and 1h/6h/24h results)
+# and sends a daily scorecard, so we can tune the filters from REAL results instead of guesses.
+PINGS_FILE = "pings_log.json"
+SCORECARD_HOUR = 21           # local time for the daily scorecard ping
+OUTCOME_CHECK_MINUTES = 10
+
+
+def _load_pings():
+    try:
+        with open(os.path.join(HERE, PINGS_FILE)) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_pings(pings):
+    try:
+        with open(os.path.join(HERE, PINGS_FILE), "w") as f:
+            json.dump(pings[-2000:], f, indent=1)
+    except Exception as e:
+        log(f"could not save pings log: {e}")
+
+
+def log_ping(kind, m):
+    pings = _load_pings()
+    pings.append({"t": time.time(), "kind": kind, "symbol": m["symbol"], "name": m["name"], "addr": m["addr"],
+                  "chain": m["chain"], "mcap": m["mcap"], "price": m["price"], "url": m["url"],
+                  "peak_x": 1.0, "x_1h": None, "x_6h": None, "x_24h": None})
+    _save_pings(pings)
+
+
+def outcomes_update():
+    pings = _load_pings()
+    now = time.time()
+    todo = [p for p in pings if p.get("price") and now - p["t"] <= 26 * 3600 and p.get("x_24h") is None]
+    by_chain = {}
+    for p in todo:
+        by_chain.setdefault(p["chain"], []).append(p["addr"])
+    for chain, addrs in by_chain.items():
+        pairs = dex_pairs_for_tokens(chain, list(set(addrs)))
+        for p in todo:
+            pr = pairs.get(p["addr"])
+            if p["chain"] != chain or not pr:
+                continue
+            x = float(pr.get("priceUsd") or 0) / p["price"] if p["price"] else 0
+            p["peak_x"] = max(p.get("peak_x") or 1.0, x)
+            age = now - p["t"]
+            for key, secs in (("x_1h", 3600), ("x_6h", 6 * 3600), ("x_24h", 24 * 3600)):
+                if p.get(key) is None and age >= secs:
+                    p[key] = round(x, 3)
+    _save_pings(pings)
+
+
+def scorecard_text(hours=24):
+    pings = [p for p in _load_pings() if time.time() - p["t"] <= hours * 3600]
+    if not pings:
+        return "No pings in the last 24h."
+    hit2 = [p for p in pings if (p.get("peak_x") or 0) >= 2]
+    hit5 = [p for p in pings if (p.get("peak_x") or 0) >= 5]
+    dead = [p for p in pings if p.get("x_6h") is not None and p["x_6h"] <= 0.5]
+    best = sorted(pings, key=lambda p: -(p.get("peak_x") or 0))[:5]
+    lines = [f"Pings: {len(pings)} | peaked 2x+: {len(hit2)} | 5x+: {len(hit5)} | -50% or worse by 6h: {len(dead)}",
+             "Best:"]
+    for p in best:
+        lines.append(f"- {p['kind']} ${p['symbol']} @ {fmt_usd(p['mcap'])}: peak {p.get('peak_x', 1):.1f}x, "
+                     f"6h {p.get('x_6h') or '-'}x")
+    by_kind = {}
+    for p in pings:
+        k = by_kind.setdefault(p["kind"], [0, 0])
+        k[0] += 1
+        k[1] += (p.get("peak_x") or 0) >= 2
+    lines.append("By type (pings / hit 2x): " + ", ".join(f"{k} {v[0]}/{v[1]}" for k, v in by_kind.items()))
+    lines.append("Send this to Claude to tune the filters. (Peak = best price seen in 10-min checks.)")
+    return "\n".join(lines)
+
+
+async def scorecard_loop(state):
+    loop = asyncio.get_running_loop()
+    last_day = None
+    while True:
+        try:
+            await loop.run_in_executor(None, outcomes_update)
+            now = datetime.now()
+            if now.hour == SCORECARD_HOUR and last_day != now.date():
+                last_day = now.date()
+                send_ntfy("Radar daily scorecard", scorecard_text(), priority="default", tags="bar_chart")
+        except Exception as e:
+            log(f"scorecard error: {e}")
+        await asyncio.sleep(OUTCOME_CHECK_MINUTES * 60)
+
+
 async def main():
     state = State(os.path.join(HERE, STATE_FILE))
     log("Memecoin Radar starting - ALERTS ONLY. Phone topic: " + NTFY_TOPIC)
+    if "--scorecard" in sys.argv:
+        outcomes_update()
+        print(scorecard_text())
+        return
     if "--test" in sys.argv:
         send_ntfy("Radar test", "Memecoin Radar is connected to your phone.", tags="white_check_mark")
         return
     await asyncio.gather(runners_loop(state), keywords_loop(state), graduations_loop(state),
-                         smart_wallets_loop(state), sleepers_loop(state), x_vip_loop(state))
+                         smart_wallets_loop(state), sleepers_loop(state), x_vip_loop(state),
+                         scorecard_loop(state))
 
 
 if __name__ == "__main__":
