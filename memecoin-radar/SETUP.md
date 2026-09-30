@@ -102,6 +102,11 @@ Every new pump.fun coin is checked the moment it's created. If its name or ticke
 ## Moonbag
 The scorecard also tracks a "moonbag" version of the lotto plan: after the trailing sell, keep 15% forever. 100x coins usually dip 50%+ several times on the way, which shakes out every trailing stop. The moonbag is how you're still holding when one runs.
 
+## Cross-referencing (a story needs more than one source)
+- The radar records **where** each trending phrase came from: Trump's posts, the AI routine, Polymarket, the X VIPs, the X news accounts, your keywords.txt, Google Trends, Wikipedia or Reddit.
+- A story coin pings only if the phrase has **one strong source** (a VIP/Trump post, the AI routine, Polymarket, a news account, your keywords) **or two independent weak ones** (e.g. Reddit + Google Trends). Something that's only on Reddit waits silently (still paper-tracked) until a second source agrees.
+- **Live web cross-check:** when Opus says PING on a story coin, it runs up to 3 web searches before your phone buzzes. It checks that the story is real and spreading in several places, that people are talking about **this** coin rather than a copy, and that there are no scam warnings. If it can't confirm, the ping is skipped. Pings that pass start with **"AI+WEB OK"** and say where the story was found. Capped at 8 a day, roughly 10–20p each.
+
 ## AI check (Claude Opus 5.5)
 Before a phone ping, the radar sends the coin's numbers and its story to Claude Opus 5.5, which answers **PING** or **SKIP** with a one-line reason.
 - Pings that pass start with **"AI OK"** and include the reason and the main risk.

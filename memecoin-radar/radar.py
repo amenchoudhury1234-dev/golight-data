@@ -475,6 +475,9 @@ AI_MODEL = "claude-opus-5-5"
 AI_EFFORT = "medium"
 AI_MAX_CALLS_PER_DAY = 80          # hard guard on spend (~2-3p per call)
 AI_USAGE_FILE = "ai_usage.json"
+AI_DEEP_MAX_PER_DAY = 8            # live web cross-checks (~10-20p each: up to 3 searches + reading results)
+AI_DEEP_SEARCHES = 3
+AI_PRICE_SEARCH = 0.01             # $ per web search
 AI_PRICE_IN, AI_PRICE_OUT = 4.00, 20.00   # $ per million tokens (Opus 5.5)
 RECENT_VIP = []                    # (time, account, text) from the X watch, fed to the judge
 _AI = {"client": None, "tried": False, "lock": threading.Lock()}
@@ -525,7 +528,7 @@ def _ai_client():
         return _AI["client"]
 
 
-def _ai_usage(add_in=0, add_out=0):
+def _ai_usage(add_in=0, add_out=0, searches=0, deep=False):
     """Track calls and $ per day in ai_usage.json. Returns today's record."""
     path, day = os.path.join(HERE, AI_USAGE_FILE), datetime.now().strftime("%Y-%m-%d")
     try:
@@ -534,15 +537,34 @@ def _ai_usage(add_in=0, add_out=0):
     except Exception:
         u = {}
     rec = u.setdefault(day, {"calls": 0, "usd": 0.0})
+    rec.setdefault("deep", 0)
     if add_in or add_out:
         rec["calls"] += 1
-        rec["usd"] = round(rec["usd"] + (add_in * AI_PRICE_IN + add_out * AI_PRICE_OUT) / 1e6, 4)
+        rec["deep"] += 1 if deep else 0
+        rec["usd"] = round(rec["usd"] + (add_in * AI_PRICE_IN + add_out * AI_PRICE_OUT) / 1e6
+                           + searches * AI_PRICE_SEARCH, 4)
         try:
             with open(path, "w") as f:
                 json.dump(u, f)
         except Exception:
             pass
     return rec
+
+
+def story_backing(flags):
+    """(phrase, sorted sources, strong?) for the story behind a ping. Strong = at least one strong source (a VIP/
+    Trump post, the AI routine, Polymarket, a news account, your keywords.txt) or 2+ independent weak ones."""
+    flags = flags or {}
+    phrase = flags.get("story") or flags.get("keyword") or ""
+    if not phrase:
+        return "", [], False
+    if phrase.startswith("@") or flags.get("launch_src", "").startswith("@"):
+        return phrase, ["x-news" if phrase.startswith("@") else "x-vip"], True
+    srcs = set(AUTO.sources(phrase)) if AUTO is not None else set()
+    if phrase in load_keywords():
+        srcs.add("manual")
+    strong = bool(srcs & STRONG_SOURCES) or len(srcs & WEAK_SOURCES) >= 2
+    return phrase, sorted(srcs), strong
 
 
 def _coin_brief(kind, m, extra, rc_notes, flags):
@@ -564,6 +586,9 @@ def _coin_brief(kind, m, extra, rc_notes, flags):
         if AUTO is not None and story in AUTO.seen:
             age = f" (radar first saw this phrase trending {(now - AUTO.seen[story]) / 3600:.1f}h ago)"
         lines.append(f'Matched real-world phrase: "{story}"{age}')
+        _, srcs, strong = story_backing(flags)
+        if srcs:
+            lines.append(f"Phrase seen in: {', '.join(srcs)} ({'cross-referenced' if strong else 'SINGLE weak source'})")
     snaps = SNAPS.get(m["addr"]) or []
     if len(snaps) >= 3:
         pts = [f"{(now - t) / 60:.0f}m ago {p / m['price']:.2f}x" for t, p in snaps[-8:] if m["price"]]
@@ -626,6 +651,57 @@ def ai_judge(kind, m, extra, rc_notes, flags):
     return out
 
 
+DEEP_SYSTEM = JUDGE_SYSTEM + """
+
+LIVE CROSS-CHECK: you have web search (max 3 searches). Use it to cross-reference the story, not to research
+crypto in general. Check: (1) is the real-world story/post real, recent (hours, not days) and actually spreading
+(news, X, TikTok, Reddit - several independent places)? (2) are people on X/crypto news talking about THIS coin
+(name/ticker/CA), or is it one of many copies? (3) any scam/rug/bundle/caller-dump warnings about it? A story seen
+in only one place, or a coin nobody mentions, is a SKIP unless the on-chain numbers are exceptional.
+End your answer with ONE line of JSON only, exactly:
+{"verdict": "PING" or "SKIP", "confidence": 1-5, "reason": "<max 25 words>", "main_risk": "<max 12 words>",
+ "sources_found": "<max 15 words: where you saw the story/coin>"}"""
+
+
+def ai_deep_check(kind, m, extra, rc_notes, flags):
+    """Second, slower opinion with live web search. Returns the parsed dict or None (then the quick verdict stands)."""
+    import re
+    client = _ai_client()
+    if client is None or _ai_usage().get("deep", 0) >= AI_DEEP_MAX_PER_DAY:
+        return None
+    msgs = [{"role": "user", "content": _coin_brief(kind, m, extra, rc_notes, flags)}]
+    tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": AI_DEEP_SEARCHES}]
+    tin = tout = searches = 0
+    try:
+        for _ in range(3):                     # resume at most twice if the server pauses the search loop
+            resp = client.messages.create(model=AI_MODEL, max_tokens=8000, system=DEEP_SYSTEM, tools=tools,
+                                          output_config={"effort": AI_EFFORT}, messages=msgs)
+            tin += resp.usage.input_tokens
+            tout += resp.usage.output_tokens
+            stu = getattr(resp.usage, "server_tool_use", None)
+            searches += int(getattr(stu, "web_search_requests", 0) or 0) if stu else 0
+            if resp.stop_reason != "pause_turn":
+                break
+            msgs = [msgs[0], {"role": "assistant", "content": resp.content}]
+    except Exception as e:
+        log(f"AI deep check failed ({type(e).__name__}: {str(e)[:120]}) - using the quick verdict")
+        return None
+    rec = _ai_usage(tin, tout, searches, deep=True)
+    if resp.stop_reason == "refusal":
+        return None
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    found = re.findall(r"\{[^{}]*\"verdict\"[^{}]*\}", text)
+    try:
+        out = json.loads(found[-1])
+        assert out["verdict"] in ("PING", "SKIP")
+    except Exception:
+        log(f"AI deep check: unreadable answer {text[-120:]!r}")
+        return None
+    log(f"AI deep check ${m['symbol']}: {out['verdict']} ({out.get('confidence')}/5) {out.get('reason')} | "
+        f"seen: {out.get('sources_found', '?')} [{searches} searches; today {rec['calls']} checks, ${rec['usd']:.2f}]")
+    return out
+
+
 def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     real = story_coin_symbols().get(m["symbol"].lstrip("$").upper())
     if real and real != m["addr"]:
@@ -637,6 +713,11 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
                  f"behind it. Double-check the CA.\n" + extra)
     if NARRATIVE_MODE and kind in MOMENTUM_KINDS and not (flags or {}).get("story"):
         log_candidate(kind, m, False, ["silent (momentum only)"], flags)   # paper-traded, no phone ping
+        return
+    phrase, srcs, strong_story = story_backing(flags)
+    if phrase and not strong_story:
+        # e.g. a coin matching a phrase that's only on Reddit: wait until a 2nd source (Google, news, a VIP) agrees
+        log_candidate(kind, m, False, [f"single source ({', '.join(srcs) or '?'})"], flags)
         return
     prev = state.alerted.get(m["addr"])
     if not skip_dedupe and not state.should_alert(m["addr"], m["mcap"]):
@@ -673,16 +754,22 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     if not verified:
         extra = "SAFETY UNVERIFIED - check GMGN (bundlers/insiders/top10) before anything.\n" + extra
     verdict = ai_judge("ACT NOW" if strong else kind, m, extra, rc_notes, flags)
+    if verdict and verdict["verdict"] == "PING" and (phrase or kind in ("SLEEPER WAKING", "SMART MONEY", "NEWS MENTION")):
+        deep = ai_deep_check(kind, m, extra, rc_notes, flags)
+        if deep:
+            verdict = dict(deep, deep=True)
     flags = dict(flags or {})
     if verdict:
-        flags.update(ai=verdict["verdict"], ai_conf=verdict["confidence"])
+        flags.update(ai=verdict["verdict"], ai_conf=verdict.get("confidence"), ai_deep=bool(verdict.get("deep")))
         if verdict["verdict"] == "SKIP":
             state.alerted[m["addr"]] = m["mcap"]      # don't re-judge it until it doubles
             state.save()
             log_candidate(kind, m, False, [f"AI skip: {verdict['reason'][:80]}"], flags)
             return
-        extra = (f"AI CHECK: worth a look ({verdict['confidence']}/5) - {verdict['reason']} "
-                 f"Main risk: {verdict['main_risk']}\n" + extra)
+        seen = f" Story/coin seen in: {verdict['sources_found']}." if verdict.get("sources_found") else ""
+        extra = (f"AI CHECK{' (web cross-checked)' if verdict.get('deep') else ''}: worth a look "
+                 f"({verdict.get('confidence')}/5) - {verdict.get('reason')}{seen} "
+                 f"Main risk: {verdict.get('main_risk')}\n" + extra)
     if strong:
         title = f"ACT NOW (10-min window): ${m['symbol']} {fmt_usd(m['mcap'])} {m['chg_h1']:+.0f}% 1h"
         extra = ("STRONG SETUP: buyers heavily outnumber sellers on big volume. If GMGN checks pass, "
@@ -690,7 +777,7 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     else:
         title = f"{kind}: ${m['symbol']} {fmt_usd(m['mcap'])} ({m['chg_h1']:+.0f}% 1h)"
     if verdict:
-        title = "AI OK " + title
+        title = ("AI+WEB OK " if verdict.get("deep") else "AI OK ") + title
     body = (
         f"{m['name']} (${m['symbol']}) on {m['chain']}\n"
         f"CA: {m['addr']}\n"
@@ -964,27 +1051,46 @@ def harvest_polymarket_mentions():
 AUTO = None  # shared AutoKeywords instance (runners loop uses it to tag real-world-backed coins)
 
 
+STRONG_SOURCES = {"trump", "ai-routine", "polymarket", "x-vip", "x-news", "manual"}
+WEAK_SOURCES = {"reddit", "google", "wikipedia"}   # need a second, independent source before they count
+
+
 class AutoKeywords:
     def __init__(self):
         self.seen = {}        # phrase -> first-seen timestamp
+        self.src = {}         # phrase -> {source: last-seen timestamp}
         self.last_harvest = 0
+
+    def add(self, phrase, source, now=None):
+        now = now or time.time()
+        self.seen.setdefault(phrase, now)
+        self.src.setdefault(phrase, {})[source] = now
+
+    def sources(self, phrase):
+        """Independent sources that mention this phrase, or something containing it (e.g. 'raccoon' in a
+        Reddit title and in Elon's post)."""
+        out = set(self.src.get(phrase, {}))
+        if len(phrase) >= 4:
+            for ph, srcs in self.src.items():
+                if ph != phrase and (phrase in ph or ph in phrase and len(ph) >= 4):
+                    out |= set(srcs)
+        return out
 
     def refresh(self):
         if time.time() - self.last_harvest < 15 * 60:
             return
         self.last_harvest = time.time()
-        found = set()
-        found |= harvest_ai_topic()
-        found |= harvest_trump()
-        found |= harvest_google_trends()
-        found |= harvest_wikipedia_spikes()
-        found |= harvest_polymarket_mentions()
-        found |= harvest_reddit()
         now = time.time()
-        for ph in found:
-            self.seen.setdefault(ph, now)
+        found = set()
+        for source, fn in (("ai-routine", harvest_ai_topic), ("trump", harvest_trump), ("google", harvest_google_trends),
+                           ("wikipedia", harvest_wikipedia_spikes), ("polymarket", harvest_polymarket_mentions),
+                           ("reddit", harvest_reddit)):
+            for ph in fn():
+                self.add(ph, source, now)
+                found.add(ph)
         cutoff = now - AUTO_KEYWORD_TTL_HOURS * 3600
         self.seen = {k: v for k, v in self.seen.items() if v >= cutoff}
+        self.src = {k: v for k, v in self.src.items() if max(v.values()) >= cutoff}
         log(f"auto-keywords: {len(found)} harvested, {len(self.seen)} active")
 
     def active(self, limit=80):
@@ -1308,6 +1414,9 @@ async def x_vip_loop(state):
                               "Copycats appear within seconds - use ONLY this exact CA. Check GMGN first.",
                               click=f"https://dexscreener.com/solana/{ca}", priority="urgent", tags="rotating_light")
                 if name in X_FEED_ACCOUNTS:
+                    if AUTO is not None:
+                        for ph in vip_phrases(text):
+                            AUTO.src.setdefault(ph, {})["x-news"] = time.time()
                     await feed_post_tickers(state, name, text)
                     continue
                 # 2) memeable phrases -> feed the keyword engine + ping existing matching coins BEFORE they move
@@ -1315,6 +1424,7 @@ async def x_vip_loop(state):
                 if AUTO is not None:
                     now = time.time()
                     for ph in phrases:
+                        AUTO.add(ph, "x-vip", now)
                         AUTO.seen[ph] = now      # newest = searched first, every 3 minutes
                 matches = []
                 routine = VIP_ROUTINE_WORDS.get(name, set())
@@ -1619,7 +1729,7 @@ def scorecard_text(hours=24):
                          f"{sum((p.get('peak_x') or 0) >= 2 for p in grp)} | lotto result "
                          f"{_gbp(sum(_pnl(p, 'lotto') or 0 for p in grp))}")
         u = _ai_usage()
-        L.append(f"AI cost today: {u['calls']} checks, ${u['usd']:.2f}")
+        L.append(f"AI cost today: {u['calls']} checks ({u.get('deep', 0)} web cross-checks), ${u['usd']:.2f}")
     best = sorted(pings, key=lambda p: -(p.get("peak_x") or 0))[:3]
     if best:
         L.append("Best: " + "; ".join(f"{p['kind']} ${p['symbol']} peak {p.get('peak_x', 1):.1f}x "
