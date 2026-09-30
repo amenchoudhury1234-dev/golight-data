@@ -1589,8 +1589,9 @@ async def scorecard_loop(state):
 POSITIONS_FILE = "positions.txt"
 POS_STATE_FILE = "positions_state.json"
 POS_POLL_SECONDS = 30
-# 30 Sep ping review (9 coins): a -30% stop lost on 8 of 9 - even the winners (CROOK 7x, SI 7.2x, terrafying 3.3x)
-# fell 20-82% first. "Lotto" exits (no stop, half at 2x, trail 50%) were +GBP79 vs -GBP52 for the stop rules.
+# 30 Sep ping review (all 29 pings, GBP50 each): BOTH exit styles lost - stop -30%: -GBP159, lotto (no stop, half at
+# 2x, trail 50%): -GBP104. Lotto lost less because winners (CROOK 7x, terrafying 3.3x) fell 76-82% first and the stop
+# sold them at the bottom. Most of those 29 were price-only pings that are now silent (narrative mode).
 # So by default there is no stop: the SIZE is your stop (only put in what you can lose completely).
 POS_HARD_STOP = None         # e.g. 0.70 to bring back a -30% stop alert
 POS_TRAIL = 0.50             # after selling half at 2x, sell the rest when it's this far off its peak
@@ -1727,6 +1728,16 @@ def nursery_add(mint):
             NURSERY.pop(a, None)
 
 
+def _launch_matches(phrase, lite):
+    """Stricter than coin_matches for brand-new coins: 1-2 letter tickers ($SB, $7) match too many phrases by
+    acronym alone, so an acronym only counts if it's 3+ letters."""
+    if not coin_matches(phrase, lite):
+        return False
+    sym = lite["symbol"].replace("$", "").lower()
+    p = phrase.replace(" ", "").lower()
+    return len(sym) >= 3 or p in lite["name"].replace(" ", "").lower() or p == sym and len(p) >= 3
+
+
 def story_launch_match(name, symbol):
     """Does a brand-new pump.fun coin's name/ticker match something a VIP just posted, or a live trending phrase?"""
     lite = {"name": name or "", "symbol": symbol or ""}
@@ -1734,11 +1745,11 @@ def story_launch_match(name, symbol):
     for t, acct, text in reversed(RECENT_VIP):
         if now - t <= STORY_LAUNCH_VIP_HOURS * 3600:
             for ph in vip_phrases(text):
-                if len(ph) >= 4 and coin_matches(ph, lite):
+                if len(ph) >= 4 and _launch_matches(ph, lite):
                     return ph, f"@{acct} post {(now - t) / 60:.0f} min ago"
     if AUTO is not None:
         for kw in AUTO.active(200):
-            if len(kw) >= 5 and coin_matches(kw, lite):
+            if len(kw) >= 5 and _launch_matches(kw, lite):
                 return kw, "trending phrase"
     return None
 
