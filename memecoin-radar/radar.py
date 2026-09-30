@@ -1112,9 +1112,16 @@ AUTO = None  # shared AutoKeywords instance (runners loop uses it to tag real-wo
 
 # ----------------------------- LAUNCH CLUSTERS (a story before it's in the news) -----------------------------
 # People who just saw a viral clip launch coins named after it within minutes - usually hours before news sites
-# write about it. 3+ DIFFERENT creators using the same new word inside 15 min = a launch cluster (weak source).
+# write about it. 3+ DIFFERENT creators using the same word inside 15 min = a launch cluster (weak source) -
+# but only if that's a SPIKE: at least 3x the word's own normal rate over the last 6h. A brand-new word (a new
+# story) still triggers at 3 creators; words that are in launches all day ("space", "rocket") need a real surge.
+# 30 Sep first hour at a flat 3: 91 clusters/hour, and "space" + Wikipedia wasted AI checks on SpaceX/Rocket coins.
 LAUNCH_CLUSTER_MIN_CREATORS = 3
 LAUNCH_CLUSTER_MINUTES = 15
+LAUNCH_BASELINE_HOURS = 6
+LAUNCH_SPIKE_MULTIPLE = 3.0
+LAUNCH_HISTORY_FILE = "launch_history.json"   # keeps the baseline across restarts
+_LAUNCH_META = {"start": time.time(), "loaded": False, "saved": 0.0}
 LAUNCH_FILLER = set("""coin token inu pepe doge dogs cats kitty puppy meme memes official based chad moon moons
 baby mini mega super ultra king queen lord little shib floki bonk bull bear frog solana pump fun sol trump elon
 musk donald president america world money cash rich gold life love happy wife time first real pump launch
@@ -1123,27 +1130,65 @@ _LAUNCH_WORDS = {}   # word -> {creator: time}
 _CLUSTER_LOGGED = {}  # word -> time last logged
 
 
+def _launch_history_io(now):
+    """Load the word history once at start; save it every 10 min (small JSON, 6h window)."""
+    path = os.path.join(HERE, LAUNCH_HISTORY_FILE)
+    if not _LAUNCH_META["loaded"]:
+        _LAUNCH_META["loaded"] = True
+        try:
+            with open(path) as f:
+                d = json.load(f)
+            _LAUNCH_META["start"] = min(_LAUNCH_META["start"], float(d.get("start", now)))
+            _LAUNCH_WORDS.update({w: dict(s) for w, s in (d.get("words") or {}).items()})
+        except Exception:
+            pass
+    if now - _LAUNCH_META["saved"] >= 600:
+        _LAUNCH_META["saved"] = now
+        keep = now - LAUNCH_BASELINE_HOURS * 3600
+        for w in [w for w, s in _LAUNCH_WORDS.items() if max(s.values()) < keep]:
+            _LAUNCH_WORDS.pop(w, None)
+        for w, s in _LAUNCH_WORDS.items():
+            _LAUNCH_WORDS[w] = {c: t for c, t in s.items() if t >= keep}
+        try:
+            with open(path, "w") as f:
+                json.dump({"start": max(_LAUNCH_META["start"], keep), "words": _LAUNCH_WORDS}, f)
+        except Exception as e:
+            log(f"could not save launch history: {e}")
+
+
+def launch_spike(word, now=None):
+    """(recent creators in the last 15 min, normal creators per 15 min over the last 6h or None if <1h of history,
+    is it a cluster?)."""
+    now = now or time.time()
+    recent_cut = now - LAUNCH_CLUSTER_MINUTES * 60
+    base_cut = max(now - LAUNCH_BASELINE_HOURS * 3600, _LAUNCH_META["start"])
+    s = _LAUNCH_WORDS.get(word, {})
+    recent = sum(t >= recent_cut for t in s.values())
+    span = recent_cut - base_cut
+    if span < 3600:                       # not enough history yet: fall back to the plain 3-creator rule
+        return recent, None, recent >= LAUNCH_CLUSTER_MIN_CREATORS
+    base = sum(base_cut <= t < recent_cut for t in s.values()) / (span / (LAUNCH_CLUSTER_MINUTES * 60))
+    return recent, base, recent >= max(LAUNCH_CLUSTER_MIN_CREATORS, LAUNCH_SPIKE_MULTIPLE * base)
+
+
 def launch_cluster_note(name, symbol, creator):
     import re
     now = time.time()
-    cutoff = now - LAUNCH_CLUSTER_MINUTES * 60
+    _launch_history_io(now)
     words = {w for w in re.findall(r"[a-z]{5,}", f"{name or ''} {symbol or ''}".lower())
              if w not in LAUNCH_FILLER and w not in STOP}
     for w in words:
-        seen = {c: t for c, t in _LAUNCH_WORDS.get(w, {}).items() if t >= cutoff}
-        seen[creator] = now
-        _LAUNCH_WORDS[w] = seen
-        if len(seen) >= LAUNCH_CLUSTER_MIN_CREATORS and AUTO is not None:
+        _LAUNCH_WORDS.setdefault(w, {})[creator] = now
+        recent, base, cluster = launch_spike(w, now)
+        if cluster and AUTO is not None:
             AUTO.add(w, "launch-cluster", now)
             AUTO.seen[w] = max(AUTO.seen.get(w, 0), now)   # newest phrases are searched first
             if now - _CLUSTER_LOGGED.get(w, 0) > 30 * 60:
                 _CLUSTER_LOGGED[w] = now
                 others = sorted(set(AUTO.sources(w)) - {"launch-cluster"})
-                log(f'launch cluster: "{w}" - {len(seen)} creators launched coins with it in {LAUNCH_CLUSTER_MINUTES} min'
+                normal = "no history yet" if base is None else f"normally {base:.1f}"
+                log(f'launch cluster: "{w}" - {recent} creators in {LAUNCH_CLUSTER_MINUTES} min ({normal})'
                     + (f" | also in: {', '.join(others)} (cross-referenced)" if others else " | no other source yet"))
-    if len(_LAUNCH_WORDS) > 5000:                       # forget words nobody has used for a while
-        for w in [w for w, s in _LAUNCH_WORDS.items() if max(s.values()) < cutoff]:
-            _LAUNCH_WORDS.pop(w, None)
 
 
 STRONG_SOURCES = {"trump", "ai-routine", "polymarket", "x-vip", "x-news", "manual", "news-multi"}
