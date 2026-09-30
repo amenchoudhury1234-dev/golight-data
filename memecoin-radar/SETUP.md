@@ -34,8 +34,15 @@ python radar.py
 Leave the window open. It prints what it checks every minute, and you can stop it with Ctrl+C.
 **It only works while the laptop is on and awake.** Set your laptop so it doesn't go to sleep while plugged in.
 
-## 6. Keeping it useful
-- When Trump, Elon or anyone else says something catchy, **add the phrase to `keywords.txt`** (one per line). The radar picks it up within 3 minutes, with no restart needed.
+## 6. Keywords are automatic
+The radar finds trending phrases **by itself** every 15 minutes, from:
+- **Trump's Truth Social posts:** quoted phrases, ALL-CAPS words and capitalised names.
+- **Google Trends:** what the US and UK are searching for right now.
+- **Wikipedia:** pages whose views suddenly spiked, such as a new animal or a person in the news.
+- **The hourly Claude "Catalyst watch":** its AI picks the memeable phrases from the news and sends them to your radar.
+
+Every 3 minutes it checks each phrase for a Solana or Base coin with a **matching name or ticker** (including initials, e.g. "super intelligence" matches $SI) that is starting to move on real volume. Phrases expire after 48 hours.
+You don't need to touch `keywords.txt`. It's only there if you ever want to force a phrase in yourself.
 - **Too many pings?** In `radar.py`, raise `RUNNER_MIN_H1_CHANGE` (for example to 100) or `RUNNER_MIN_H1_VOLUME` (for example to 50000).
 - **Too few?** Lower them a bit.
 - The radar caps itself at 6 alerts an hour.

@@ -310,21 +310,194 @@ def load_keywords():
         return []
 
 
+# ----------------------------- AUTO KEYWORDS (you don't have to add any) -----------------------------
+# "Attention arbitrage": mainstream attention (Trump's posts, Google searches, Wikipedia spikes, the AI
+# routine's picks) shows up BEFORE crypto Twitter prices it in. We harvest trending phrases automatically,
+# then check DexScreener for a Solana/Base coin with that name/ticker that is starting to move.
+
+AUTO_KEYWORD_TTL_HOURS = 48
+KW_TOPIC = "scout-kw-c639f2f6f2bd1f4401"   # the hourly Claude routine publishes AI-picked phrases here
+TRUMP_FEED = "https://trumpstruth.org/feed"  # public RSS mirror of Trump's Truth Social posts
+
+STOP = set("""the a an and or of to in on for with at by from is are was were be been it this that
+these those as not but if then so we you they he she i our your their my me us them his her its
+will would can could should just very more most much many all any some no yes new now today big
+great good bad best news breaking update video live watch thank thanks president trump donald america
+american united states people country world day time year years week""".split())
+
+
+def _clean(s):
+    return " ".join("".join(ch if ch.isalnum() or ch == " " else " " for ch in s).split())
+
+
+def extract_phrases(text):
+    """Pull memeable candidates from a post: quoted phrases, ALL-CAPS words, Capitalised 1-3 word phrases."""
+    import re
+    out = set()
+    for q in re.findall(r'["“]([^"”]{3,40})["”]', text):
+        q = _clean(q)
+        if 1 <= len(q.split()) <= 4:
+            out.add(q.lower())
+    for w in re.findall(r"\b[A-Z]{4,15}\b", text):          # Trump-style CAPS words
+        if w.lower() not in STOP:
+            out.add(w.lower())
+    for ph in re.findall(r"\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){0,2})\b", text):
+        words = [w for w in ph.split() if w.lower() not in STOP]
+        if words:
+            out.add(" ".join(words).lower())
+    return out
+
+
+def fetch_rss_titles(url, limit=40):
+    import xml.etree.ElementTree as ET
+    req = urllib.request.Request(url, headers={"User-Agent": UA["User-Agent"]})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        root = ET.fromstring(r.read())
+    items = []
+    for it in root.iter("item"):
+        t = (it.findtext("title") or "") + " " + (it.findtext("description") or "")
+        items.append(t)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def harvest_trump():
+    try:
+        phrases = set()
+        for t in fetch_rss_titles(TRUMP_FEED, 15):
+            phrases |= extract_phrases(t)
+        return phrases
+    except Exception as e:
+        log(f"trump feed unavailable: {e}")
+        return set()
+
+
+def harvest_google_trends():
+    phrases = set()
+    for geo in ("US", "GB"):
+        try:
+            for t in fetch_rss_titles(f"https://trends.google.com/trending/rss?geo={geo}", 25):
+                # the RSS title is the search term itself
+                term = _clean(t.split("  ")[0])[:40].lower()
+                if term and term not in STOP:
+                    phrases.add(" ".join(term.split()[:4]))
+        except Exception as e:
+            log(f"google trends ({geo}) unavailable: {e}")
+    return phrases
+
+
+def harvest_wikipedia_spikes():
+    """Pages that jumped into yesterday's top views vs the day before (new animals, people, events)."""
+    from datetime import timedelta
+    def top(day):
+        url = ("https://wikimedia.org/api/rest_v1/metrics/pageviews/top/en.wikipedia/all-access/"
+               f"{day:%Y/%m/%d}")
+        arts = http_json(url)["items"][0]["articles"]
+        return [a["article"] for a in arts[:200]]
+    try:
+        d1 = datetime.utcnow() - timedelta(days=1)
+        y, before = top(d1), set(top(d1 - timedelta(days=1)))
+        out = set()
+        for a in y[:120]:
+            if a in before or ":" in a or a in ("Main_Page",):
+                continue
+            out.add(_clean(a.replace("_", " ")).lower())
+        return out
+    except Exception as e:
+        log(f"wikipedia spikes unavailable: {e}")
+        return set()
+
+
+def harvest_ai_topic():
+    """Phrases the hourly Claude 'Catalyst watch' routine publishes (one per line) to the KW ntfy topic."""
+    try:
+        req = urllib.request.Request(f"https://ntfy.sh/{KW_TOPIC}/json?poll=1&since=48h", headers=UA)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            lines = r.read().decode("utf-8").splitlines()
+        out = set()
+        for ln in lines:
+            try:
+                msg = json.loads(ln).get("message", "")
+            except Exception:
+                continue
+            for kw in msg.splitlines():
+                kw = _clean(kw).lower()
+                if 2 <= len(kw) <= 40:
+                    out.add(kw)
+        return out
+    except Exception as e:
+        log(f"AI keyword topic unavailable: {e}")
+        return set()
+
+
+def acronym(phrase):
+    ws = phrase.split()
+    return "".join(w[0] for w in ws).lower() if len(ws) >= 2 else ""
+
+
+def coin_matches(phrase, m):
+    """True if the coin's name/ticker genuinely matches the phrase (not just a loose search hit)."""
+    p = phrase.replace(" ", "").lower()
+    name = m["name"].replace(" ", "").lower()
+    sym = m["symbol"].replace("$", "").lower()
+    if len(p) >= 4 and (p in name or name in p and len(name) >= 4 or p == sym):
+        return True
+    ac = acronym(phrase)
+    if ac and len(ac) >= 2 and sym == ac:              # "super intelligence" -> $SI
+        return True
+    first = phrase.split()[0].lower() if phrase.split() else ""
+    if len(first) >= 4 and name.startswith(first) and any(x in name for x in ("inu", "coin", "cat", "dog")):
+        return True                                   # "super ..." -> "Super Inu"
+    return False
+
+
+class AutoKeywords:
+    def __init__(self):
+        self.seen = {}        # phrase -> first-seen timestamp
+        self.last_harvest = 0
+
+    def refresh(self):
+        if time.time() - self.last_harvest < 15 * 60:
+            return
+        self.last_harvest = time.time()
+        found = set()
+        found |= harvest_ai_topic()
+        found |= harvest_trump()
+        found |= harvest_google_trends()
+        found |= harvest_wikipedia_spikes()
+        now = time.time()
+        for ph in found:
+            self.seen.setdefault(ph, now)
+        cutoff = now - AUTO_KEYWORD_TTL_HOURS * 3600
+        self.seen = {k: v for k, v in self.seen.items() if v >= cutoff}
+        log(f"auto-keywords: {len(found)} harvested, {len(self.seen)} active")
+
+    def active(self, limit=80):
+        newest = sorted(self.seen.items(), key=lambda kv: -kv[1])
+        return [k for k, _ in newest[:limit]]
+
+
 async def keywords_loop(state):
     loop = asyncio.get_running_loop()
+    auto = AutoKeywords()
     while True:
-        for kw in load_keywords():
+        await loop.run_in_executor(None, auto.refresh)
+        manual = load_keywords()
+        for kw in manual + [k for k in auto.active() if k not in manual]:
             pairs = await loop.run_in_executor(None, dex_search, kw)
             best = {}
             for p in pairs:
                 m = metrics(p)
-                if m["chain"] in CHAINS and m["addr"]:
+                if m["chain"] in CHAINS and m["addr"] and (kw in manual or coin_matches(kw, m)):
                     if m["addr"] not in best or m["vol_h24"] > best[m["addr"]]["vol_h24"]:
                         best[m["addr"]] = m
             movers = sorted((m for m in best.values() if is_keyword_mover(m)), key=lambda m: -m["vol_h1"])
             for m in movers[:2]:
-                await loop.run_in_executor(None, alert, state, "KEYWORD", m, f'Matched catalyst keyword: "{kw}"')
-            await asyncio.sleep(3)  # be gentle with the API
+                src = "your keywords.txt" if kw in manual else "auto (Trump posts / Google Trends / Wikipedia / AI routine)"
+                await loop.run_in_executor(None, alert, state, "CATALYST", m,
+                                           f'Matched trending phrase "{kw}" from {src}')
+            await asyncio.sleep(1.2)  # stay well under DexScreener's 300/min search limit
         await asyncio.sleep(KEYWORD_POLL_SECONDS)
 
 
