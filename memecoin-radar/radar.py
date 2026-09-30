@@ -955,7 +955,9 @@ def harvest_reddit():
     """Viral posts (animals, clips, memes) often become coins hours later - Jimothy the raccoon was a viral clip."""
     import re
     phrases = set()
-    for url in REDDIT_FEEDS:
+    for i, url in enumerate(REDDIT_FEEDS):
+        if i:
+            time.sleep(4)                      # Reddit returns 429 when feeds are fetched back to back
         try:
             for t in fetch_rss_titles(url, 15):
                 phrases |= extract_phrases(re.sub(r"<[^>]+>", " ", t)[:300])
@@ -1385,11 +1387,25 @@ async def x_vip_loop(state):
         return
     loop = asyncio.get_running_loop()
     ids, since = {}, {}
+    ids_path = os.path.join(HERE, "x_ids.json")      # cache account ids: each lookup is a paid X read
+    try:
+        with open(ids_path) as f:
+            cached = json.load(f)
+    except Exception:
+        cached = {}
     for name in X_ACCOUNTS:
+        if cached.get(name):
+            ids[name] = cached[name]
+            continue
         try:
             ids[name] = (await loop.run_in_executor(None, x_get, f"users/by/username/{name}", token))["data"]["id"]
         except Exception as e:
             log(f"X: couldn't resolve @{name}: {e}")
+    try:
+        with open(ids_path, "w") as f:
+            json.dump(ids, f)
+    except Exception:
+        pass
     log(f"X watch on for: {', '.join('@' + n for n in ids)}")
     while True:
         for name, uid in ids.items():

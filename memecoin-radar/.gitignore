@@ -7,3 +7,4 @@ __pycache__/
 anthropic_key.txt
 ai_usage.json
 auto_sleepers.txt
+x_ids.json
