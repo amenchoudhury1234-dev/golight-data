@@ -50,6 +50,19 @@ You don't need to touch `keywords.txt`. It's only there if you ever want to forc
 - **Too few?** Lower them a bit.
 - The radar caps itself at 6 alerts an hour.
 
+## Live Elon and Trump X posts (optional, about $5–10 a month)
+X no longer lets anyone read posts for free, but its pay-per-use API is cheap: about $0.005 per post, and Elon's and Trump's original posts come to roughly $5–10 a month.
+1. Go to **console.x.com**, sign up for a developer account, create a project and an app, and add **$10 of credit**.
+2. Copy the app's **Bearer Token**, then paste it into a new file called **`x_token.txt`** in the radar folder. **Keep this file private.**
+3. Restart the radar. It will say "X watch on for: @elonmusk, @realDonaldTrump".
+
+What you'll then get, usually within about 60 seconds of a post:
+- **"@elonmusk POSTED A CONTRACT ADDRESS"** (urgent): he named a coin directly.
+- **"@elonmusk just posted – matching coins"**: coins that match his words or emojis (e.g. 🦝 → raccoon → JIMOTHY). This can arrive **before** the coin moves.
+- The phrases are also added to the keyword engine, so you get a **CATALYST** ping the moment a matching coin starts to move.
+
+Want more accounts, like WhaleInsider or WatcherGuru? Add them to `X_ACCOUNTS` in `radar.py` (about +$10–15 a month each).
+
 ## Sleeper coins (second waves)
 `sleepers.txt` lists "story coins" (Jimothy, Super Inu, Tilcayo, Rizzmas). These often pump **again** when a big account reposts their story without naming the coin. JIMOTHY did +331% after Elon posted a raccoon video. The radar checks them every minute and sends a **SLEEPER WAKING** ping when trading suddenly jumps. I'll add new story coins to the file as they appear.
 

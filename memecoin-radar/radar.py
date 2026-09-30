@@ -680,6 +680,111 @@ async def smart_wallets_loop(state):
         await asyncio.sleep(POLL_SECONDS)
 
 
+# ----------------------------- X / TWITTER VIP WATCH (Elon, Trump...) -----------------------------
+# Needs an X API bearer token (pay-per-use, ~$0.005 per post read; Elon+Trump originals ~ $5-10/month).
+# Put the token in x_token.txt next to this file. Without it, this detector is simply off.
+X_ACCOUNTS = ["elonmusk", "realDonaldTrump"]      # add e.g. "WhaleInsider", "WatcherGuru" (each ~ +$10-15/mo)
+X_POLL_SECONDS = 60
+X_TOKEN_FILE = "x_token.txt"
+EMOJI_WORDS = {"🦝": "raccoon", "🐸": "frog", "🐕": "dog", "🐶": "dog", "🐈": "cat", "🐱": "cat", "🦛": "hippo",
+               "🐿": "squirrel", "🐧": "penguin", "🦍": "gorilla", "🐂": "bull", "🦅": "eagle", "🐻": "bear",
+               "🐒": "monkey", "🐵": "monkey", "🦊": "fox", "🐹": "hamster", "🐰": "bunny", "🦈": "shark",
+               "🐳": "whale", "🦄": "unicorn", "🐷": "pig", "🐢": "turtle", "🦖": "dino", "🚀": "rocket", "🍌": "banana"}
+
+
+def x_get(path, token):
+    req = urllib.request.Request("https://api.x.com/2/" + path,
+                                 headers={"Authorization": f"Bearer {token}", **UA})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read().decode())
+
+
+def vip_phrases(text):
+    import re
+    phrases = set(extract_phrases(text))
+    for emo, word in EMOJI_WORDS.items():
+        if emo in text:
+            phrases.add(word)
+    for tag in re.findall(r"[#$]([A-Za-z][A-Za-z0-9]{1,15})", text):
+        phrases.add(tag.lower())
+    # plain lowercase nouns in very short posts (Elon often posts 1-5 words)
+    words = [w for w in _clean(text).lower().split() if len(w) >= 4 and w not in STOP]
+    if len(words) <= 5:
+        phrases.update(words)
+    return {p for p in phrases if 2 <= len(p) <= 40}
+
+
+async def x_vip_loop(state):
+    import re
+    try:
+        with open(os.path.join(HERE, X_TOKEN_FILE)) as f:
+            token = f.read().strip()
+    except FileNotFoundError:
+        log("X watch off: add your X API bearer token to x_token.txt to track Elon/Trump posts live")
+        return
+    loop = asyncio.get_running_loop()
+    ids, since = {}, {}
+    for name in X_ACCOUNTS:
+        try:
+            ids[name] = (await loop.run_in_executor(None, x_get, f"users/by/username/{name}", token))["data"]["id"]
+        except Exception as e:
+            log(f"X: couldn't resolve @{name}: {e}")
+    log(f"X watch on for: {', '.join('@' + n for n in ids)}")
+    while True:
+        for name, uid in ids.items():
+            q = "exclude=replies,retweets&tweet.fields=created_at&max_results=5"
+            if since.get(name):
+                q += f"&since_id={since[name]}"
+            try:
+                res = await loop.run_in_executor(None, x_get, f"users/{uid}/tweets?{q}", token)
+            except Exception as e:
+                log(f"X error @{name}: {e}")
+                continue
+            posts = res.get("data") or []
+            if not posts:
+                continue
+            first_run = name not in since
+            since[name] = posts[0]["id"]
+            if first_run:            # don't act on old posts at startup
+                continue
+            for post in posts:
+                text = post.get("text", "")
+                log(f"@{name} posted: {text[:80]!r}")
+                # 1) VIP named a contract address directly -> immediate urgent ping
+                for ca in re.findall(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", text):
+                    send_ntfy(f"@{name} POSTED A CONTRACT ADDRESS", f"{text[:300]}\n\nCA: {ca}\n"
+                              "Copycats appear within seconds - use ONLY this exact CA. Check GMGN first.",
+                              click=f"https://dexscreener.com/solana/{ca}", priority="urgent", tags="rotating_light")
+                # 2) memeable phrases -> feed the keyword engine + ping existing matching coins BEFORE they move
+                phrases = vip_phrases(text)
+                if AUTO is not None:
+                    now = time.time()
+                    for ph in phrases:
+                        AUTO.seen[ph] = now      # newest = searched first, every 3 minutes
+                matches = []
+                for ph in list(phrases)[:6]:
+                    for p in await loop.run_in_executor(None, dex_search, ph):
+                        m = metrics(p)
+                        if (m["chain"] in CHAINS and m["addr"] and coin_matches(ph, m)
+                                and m["liq"] >= 20_000 and m["mcap"] <= KEYWORD_MAX_MCAP):
+                            matches.append((ph, m))
+                    await asyncio.sleep(1)
+                best = {}
+                for ph, m in matches:
+                    if m["addr"] not in best or m["vol_h24"] > best[m["addr"]][1]["vol_h24"]:
+                        best[m["addr"]] = (ph, m)
+                top = sorted(best.values(), key=lambda x: -x[1]["vol_h24"])[:3]
+                if top:
+                    lines = "\n".join(f'- "{ph}" -> {m["name"]} ${m["symbol"]} {fmt_usd(m["mcap"])} | CA {m["addr"]}'
+                                      for ph, m in top)
+                    send_ntfy(f"@{name} just posted - matching coins", f'"{text[:200]}"\n\nExisting coins that match:\n'
+                              f"{lines}\n\nThese haven't necessarily moved yet - this is the EARLIEST possible heads-up "
+                              "(JIMOTHY did +331% after Elon's raccoon post). Check GMGN, max GBP50-100, half out at 2x.",
+                              click=top[0][1]["url"] or None, priority="high", tags="bird")
+            await asyncio.sleep(1)
+        await asyncio.sleep(X_POLL_SECONDS)
+
+
 # ----------------------------- SLEEPERS (second-wave detector) -----------------------------
 # Coins tied to a famous animal/character/phrase often pump AGAIN when a VIP reposts the story, even without
 # naming the coin: JIMOTHY (viral raccoon) went $3.8M -> $16.2M (+331%) on Aug 8 2026 after Elon posted a
@@ -724,7 +829,7 @@ async def main():
         send_ntfy("Radar test", "Memecoin Radar is connected to your phone.", tags="white_check_mark")
         return
     await asyncio.gather(runners_loop(state), keywords_loop(state), graduations_loop(state),
-                         smart_wallets_loop(state), sleepers_loop(state))
+                         smart_wallets_loop(state), sleepers_loop(state), x_vip_loop(state))
 
 
 if __name__ == "__main__":
