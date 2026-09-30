@@ -955,6 +955,60 @@ def fetch_rss_titles(url, limit=40):
     return items
 
 
+# ----------------------------- VIP POSTS A CONTRACT ADDRESS (the fastest, biggest signal) -----------------------------
+# $TRUMP (Jan 2025, ~$8.7B in two days) started with Trump posting the contract address himself, on Truth Social AND
+# X. Both are now checked for addresses: X every 15s (x_vip_loop), Truth Social every 30s (free RSS, truth_ca_loop).
+_CA_SEEN = set()
+
+
+def vip_contract_ping(who, text):
+    """Urgent ping for every Solana (base58) or Base (0x...) address in a VIP post, once per address."""
+    import re
+    text = re.sub(r"https?://\S+", " ", text or "")           # links contain long random strings
+    found = [(ca, "solana") for ca in re.findall(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", text)]
+    found += [(ca, "base") for ca in re.findall(r"\b0x[a-fA-F0-9]{40}\b", text)]
+    for ca, chain in found:
+        if ca in _CA_SEEN:
+            continue
+        _CA_SEEN.add(ca)
+        cb = f"https://www.coinbase.com/price/{ca}"
+        send_ntfy(f"{who} POSTED A CONTRACT ADDRESS", f"{text[:300]}\n\nCA ({chain}): {ca}\n"
+                  "Copycats appear within seconds - use ONLY this exact CA. Check GMGN first.",
+                  click=cb, priority="urgent", tags="rotating_light",
+                  actions=[{"label": "Buy on Coinbase", "url": cb},
+                           {"label": "Chart", "url": f"https://dexscreener.com/{chain}/{ca}"}])
+
+
+TRUTH_CA_POLL_SECONDS = 30
+
+
+async def truth_ca_loop(state):
+    """Trump's Truth Social (free RSS mirror) every 30s, only looking for contract addresses."""
+    import html
+    import xml.etree.ElementTree as ET
+    loop = asyncio.get_running_loop()
+    first = True
+    while True:
+        try:
+            def fetch():
+                req = urllib.request.Request(TRUMP_FEED, headers={"User-Agent": UA["User-Agent"]})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    return ET.fromstring(r.read())
+            root = await loop.run_in_executor(None, fetch)
+            for it in list(root.iter("item"))[:10]:
+                text = html.unescape((it.findtext("title") or "") + " " + (it.findtext("description") or ""))
+                if first:                            # don't ping for addresses in old posts at startup
+                    import re
+                    _CA_SEEN.update(re.findall(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b|\b0x[a-fA-F0-9]{40}\b",
+                                               re.sub(r"https?://\S+", " ", text)))
+                else:
+                    vip_contract_ping("TRUMP (Truth Social)", text)
+            first = False
+        except Exception as e:
+            log(f"Truth Social address watch: feed unavailable ({type(e).__name__})")
+        await asyncio.sleep(TRUTH_CA_POLL_SECONDS)
+
+
 def harvest_trump():
     try:
         phrases = set()
@@ -1640,12 +1694,7 @@ async def x_vip_loop(state):
                 RECENT_VIP.append((time.time(), name, text))
                 del RECENT_VIP[:-30]
                 # 1) VIP named a contract address directly -> immediate urgent ping
-                for ca in re.findall(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", text):
-                    send_ntfy(f"@{name} POSTED A CONTRACT ADDRESS", f"{text[:300]}\n\nCA: {ca}\n"
-                              "Copycats appear within seconds - use ONLY this exact CA. Check GMGN first.",
-                              click=f"https://www.coinbase.com/price/{ca}", priority="urgent", tags="rotating_light",
-                              actions=[{"label": "Buy on Coinbase", "url": f"https://www.coinbase.com/price/{ca}"},
-                                       {"label": "Chart", "url": f"https://dexscreener.com/solana/{ca}"}])
+                vip_contract_ping(f"@{name}", text)
                 if name in X_FEED_ACCOUNTS:
                     if AUTO is not None:
                         for ph in vip_phrases(text):
@@ -2421,7 +2470,7 @@ async def main():
     await asyncio.gather(runners_loop(state), keywords_loop(state), graduations_loop(state),
                          smart_wallets_loop(state), sleepers_loop(state), x_vip_loop(state),
                          scorecard_loop(state), second_leg_loop(state),
-                         positions_loop(state), ignition_loop(state), nursery_loop(state))
+                         positions_loop(state), ignition_loop(state), nursery_loop(state), truth_ca_loop(state))
 
 
 if __name__ == "__main__":
