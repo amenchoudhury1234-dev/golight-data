@@ -1058,6 +1058,13 @@ async def graduations_loop(state):
                         continue
                     if msg.get("txType") == "create":     # brand-new pump.fun launch
                         nursery_add(mint)
+                        for a in [a for a, v in STORY_LAUNCHES.items() if time.time() - v[0] > 3600]:
+                            STORY_LAUNCHES.pop(a, None)
+                        hit = story_launch_match(msg.get("name"), msg.get("symbol"))
+                        if hit and len(STORY_LAUNCHES) < STORY_LAUNCH_MAX_WATCH:
+                            STORY_LAUNCHES[mint] = (time.time(), hit[0], hit[1])
+                            log(f"story launch: ${msg.get('symbol')} matches \"{hit[0]}\" ({hit[1]}) - watching")
+                            asyncio.create_task(story_launch_watch(state, mint, hit[0], hit[1]))
                     else:                                  # migration off the bonding curve
                         hot_add(mint, "solana")
                         asyncio.create_task(recheck(mint))
@@ -1325,6 +1332,8 @@ STRATEGIES = {
     "wide": {"stop": 0.50, "half_at": 2.0, "trail": 0.40, "label": "Wider stop (-50%)"},
     "quick": {"stop": 0.70, "all_at": 2.0, "label": "Sell everything at 2x"},
     "lotto": {"stop": 0.0, "half_at": 2.0, "trail": 0.50, "label": "Lotto (no stop, half at 2x, trail 50%)"},
+    "moonbag": {"stop": 0.0, "half_at": 2.0, "trail": 0.50, "bag": 0.15,
+                "label": "Moonbag (lotto, but keep 15% forever)"},
 }
 PINGS_LOCK = threading.Lock()
 SHADOW_SEEN = {}
@@ -1372,9 +1381,10 @@ def _sim_step(st, x, cfg):
             st["realised"] += x
             st.update(frac=0.0, open=False, stopped=True)
             return
-    if st["half"] and x <= st["peak"] * (1 - cfg["trail"]):
-        st["realised"] += st["frac"] * x
-        st.update(frac=0.0, open=False)
+    if st["half"] and not st.get("trailed") and x <= st["peak"] * (1 - cfg["trail"]):
+        bag = min(cfg.get("bag", 0.0), st["frac"])          # moonbag: a slice that is never sold on the trail
+        st["realised"] += (st["frac"] - bag) * x
+        st.update(frac=bag, trailed=True, open=bag > 0)
 
 
 def _sim_value(st, last_x):
@@ -1636,7 +1646,8 @@ async def positions_loop(state):
                         fire("stop", f"STOP: ${sym} is -{(1 - x) * 100:.0f}% - sell now",
                              status + "\nHard stop reached. Sell and move on - no hoping.")
                     if "2x" in s["done"] and x <= s["peak"] * (1 - POS_TRAIL):
-                        fire("trail", f"TRAILING STOP: ${sym} is {POS_TRAIL:.0%} off its peak - sell the rest", status)
+                        fire("trail", f"TRAILING STOP: ${sym} is {POS_TRAIL:.0%} off its peak - sell the rest",
+                             status + "\nOptional: keep a small moonbag (10-15%) in case it's a 100x story coin.")
                     if dumping_now(m) and time.time() - s.get("dump_t", 0) > 600:
                         s["dump_t"] = time.time()
                         changed = True
@@ -1679,6 +1690,13 @@ NURSERY_MINUTES = 60            # brand-new pump.fun launches, swept once a minu
 NURSERY_MAX = 1500
 NURSERY_PROMOTE_MCAP = 12_000   # a launch that gets past this goes onto the fast watch
 
+STORY_LAUNCH_VIP_HOURS = 2     # a new coin named after something a VIP posted in the last 2h
+STORY_LAUNCH_CHECKS_MIN = (3, 8, 15, 30)
+STORY_LAUNCH_MIN_MCAP = 15_000
+STORY_LAUNCH_MIN_BUYS_H1 = 40
+STORY_LAUNCH_MAX_WATCH = 60
+STORY_LAUNCHES = {}            # mint -> (time, phrase, source)
+
 HOT = {}        # addr -> (added_time, chain)
 NURSERY = {}    # mint -> added_time (solana)
 SNAPS = {}      # addr -> [(time, price)]
@@ -1694,6 +1712,49 @@ def nursery_add(mint):
     if len(NURSERY) > NURSERY_MAX:
         for a in sorted(NURSERY, key=NURSERY.get)[: len(NURSERY) - NURSERY_MAX]:
             NURSERY.pop(a, None)
+
+
+def story_launch_match(name, symbol):
+    """Does a brand-new pump.fun coin's name/ticker match something a VIP just posted, or a live trending phrase?"""
+    lite = {"name": name or "", "symbol": symbol or ""}
+    now = time.time()
+    for t, acct, text in reversed(RECENT_VIP):
+        if now - t <= STORY_LAUNCH_VIP_HOURS * 3600:
+            for ph in vip_phrases(text):
+                if len(ph) >= 4 and coin_matches(ph, lite):
+                    return ph, f"@{acct} post {(now - t) / 60:.0f} min ago"
+    if AUTO is not None:
+        for kw in AUTO.active(200):
+            if len(kw) >= 5 and coin_matches(kw, lite):
+                return kw, "trending phrase"
+    return None
+
+
+async def story_launch_watch(state, mint, phrase, src):
+    """Don't ping at creation (snipers dump ~85% in 5 min). Check at 3/8/15/30 min and ping if it's getting real
+    buyers AND it's the leading coin among the launches for this phrase (copies appear within seconds)."""
+    loop = asyncio.get_running_loop()
+    hot_add(mint, "solana")
+    start = time.time()
+    for mins in STORY_LAUNCH_CHECKS_MIN:
+        await asyncio.sleep(max(0, start + mins * 60 - time.time()))
+        rivals = [a for a, (_, ph, _) in STORY_LAUNCHES.items() if ph == phrase]
+        pairs = await loop.run_in_executor(None, dex_pairs_for_tokens, "solana", rivals)
+        me = pairs.get(mint)
+        if not me:
+            continue
+        m = metrics(me)
+        leader = max(pairs.values(), key=lambda p: float((p.get("volume") or {}).get("h1") or 0))
+        if (m["mcap"] >= STORY_LAUNCH_MIN_MCAP and m["buys_h1"] >= STORY_LAUNCH_MIN_BUYS_H1
+                and m["buys_h1"] >= m["sells_h1"] and not dumping_now(m) and m["chg_m5"] >= -10
+                and (leader.get("baseToken") or {}).get("address") == mint):
+            await loop.run_in_executor(None, lambda: alert(
+                state, "STORY LAUNCH", m,
+                f'NEW COIN NAMED AFTER "{phrase}" ({src}), {mins} min old and leading {len(rivals)} copies '
+                f'on volume. Earliest possible entry on a story coin - also the riskiest. Lottery size.',
+                skip_dedupe=False, flags={"story": phrase, "launch_src": src}))
+            return
+    STORY_LAUNCHES.pop(mint, None)
 
 
 def vol_surge(m):

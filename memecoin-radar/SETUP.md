@@ -91,6 +91,12 @@ On 30 Sep, every price-only ping we could check fell 30% before reaching 2x, and
 
 Price-only coins are still tracked silently on paper and shown in the 21:00 scorecard. To get those pings back, set `NARRATIVE_MODE = False` in `radar.py`.
 
+## STORY LAUNCH pings (earliest entry on a story coin)
+Every new pump.fun coin is checked the moment it's created. If its name or ticker matches something Elon, Trump or another watched account posted in the last 2 hours (or a live trending phrase), the radar watches it at 3, 8, 15 and 30 minutes. It pings only if the coin is getting real buyers **and** is leading the copycats on volume. This is where 10–100x entries come from ($10–50K market cap), but it's also the riskiest ping, so lottery size only.
+
+## Moonbag
+The scorecard also tracks a "moonbag" version of the lotto plan: after the trailing sell, keep 15% forever. 100x coins usually dip 50%+ several times on the way, which shakes out every trailing stop. The moonbag is how you're still holding when one runs.
+
 ## AI check (Claude Opus 5.5)
 Before a phone ping, the radar sends the coin's numbers and its story to Claude Opus 5.5, which answers **PING** or **SKIP** with a one-line reason.
 - Pings that pass start with **"AI OK"** and include the reason and the main risk.
