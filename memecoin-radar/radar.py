@@ -311,21 +311,38 @@ def on_bonding_curve(m):
     return m["dex"] == "pumpfun"
 
 
+def runner_reasons(m):
+    """Why a coin is NOT an early runner (empty list = it passes). Mirrors the runner rules exactly."""
+    r = []
+    if m["chain"] not in CHAINS:
+        r.append("chain")
+    if not (RUNNER_MIN_MCAP <= m["mcap"] <= RUNNER_MAX_MCAP):
+        r.append("mcap range")
+    if m["age_h"] > RUNNER_MAX_AGE_HOURS:
+        r.append("too old")
+    if not (m["chg_h1"] >= RUNNER_MIN_H1_CHANGE or m["chg_m5"] >= RUNNER_MIN_M5_CHANGE):
+        r.append("not moving")
+    if m["vol_h1"] < RUNNER_MIN_H1_VOLUME:
+        r.append("low volume")
+    if m["buys_h1"] < RUNNER_MIN_H1_BUYS:
+        r.append("few buys")
+    if m["buys_h1"] < m["sells_h1"]:
+        r.append("sells>buys 1h")
+    if m["liq"] < RUNNER_MIN_LIQUIDITY:
+        r.append("low liquidity")
+    if m["age_h"] * 60 < RUNNER_MIN_AGE_MINUTES:
+        r.append("under 20 min old")
+    if m["chg_m5"] < RUNNER_MIN_M5_CHANGE_ALLOWED:
+        r.append("falling 5m")
+    if dumping_now(m):
+        r.append("5m dump")
+    if not m["has_social"]:
+        r.append("no socials")
+    return r
+
+
 def is_early_runner(m):
-    return (
-        m["chain"] in CHAINS
-        and RUNNER_MIN_MCAP <= m["mcap"] <= RUNNER_MAX_MCAP
-        and m["age_h"] <= RUNNER_MAX_AGE_HOURS
-        and (m["chg_h1"] >= RUNNER_MIN_H1_CHANGE or m["chg_m5"] >= RUNNER_MIN_M5_CHANGE)
-        and m["vol_h1"] >= RUNNER_MIN_H1_VOLUME
-        and m["buys_h1"] >= RUNNER_MIN_H1_BUYS
-        and m["buys_h1"] >= m["sells_h1"]
-        and m["liq"] >= RUNNER_MIN_LIQUIDITY
-        and m["age_h"] * 60 >= RUNNER_MIN_AGE_MINUTES
-        and m["chg_m5"] >= RUNNER_MIN_M5_CHANGE_ALLOWED
-        and not dumping_now(m)
-        and m["has_social"]                     # consensus: at least one social link
-    )
+    return not runner_reasons(m)
 
 
 def is_keyword_mover(m):
@@ -343,13 +360,15 @@ def is_keyword_mover(m):
 
 
 # ----------------------------- alerting -----------------------------
-def send_ntfy(title, body, click=None, priority="high", tags="rotating_light"):
+def send_ntfy(title, body, click=None, priority="high", tags="rotating_light", actions=None):
     """Publish via ntfy's JSON API so emoji / non-Latin coin names work (HTTP headers can't carry them)."""
     prio = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5}.get(priority, 4)
     payload = {"topic": NTFY_TOPIC, "title": title[:120], "message": body[:3900], "priority": prio,
                "tags": [t for t in tags.split(",") if t]}
     if click:
         payload["click"] = click
+    if actions:
+        payload["actions"] = [dict(a, action="view", clear=False) for a in actions[:3]]
     req = urllib.request.Request("https://ntfy.sh/", data=json.dumps(payload).encode("utf-8"),
                                  headers={"Content-Type": "application/json", **UA}, method="POST")
     try:
@@ -365,27 +384,49 @@ def send_ntfy(title, body, click=None, priority="high", tags="rotating_light"):
     return ok
 
 
-def alert(state, kind, m, extra="", skip_dedupe=False):
+REJECTED = set()   # coins that failed safety checks (so a later ping isn't mislabelled as a re-alert)
+
+
+def check_links(m):
+    """One-tap buttons on the phone notification: GMGN (fees/bundlers/insiders), chart, RugCheck."""
+    net = "sol" if m["chain"] == "solana" else m["chain"]
+    acts = [{"label": "GMGN", "url": f"https://gmgn.ai/{net}/token/{m['addr']}"}]
+    if m["url"]:
+        acts.append({"label": "Chart", "url": m["url"]})
+    if m["chain"] == "solana":
+        acts.append({"label": "RugCheck", "url": f"https://rugcheck.xyz/tokens/{m['addr']}"})
+    return acts
+
+
+def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
+    prev = state.alerted.get(m["addr"])
     if not skip_dedupe and not state.should_alert(m["addr"], m["mcap"]):
-        return
-    if not state.under_cap():
-        log(f"hourly alert cap reached, skipping {m['symbol']}")
         return
     if m["chain"] == "solana":
         ok, rc_notes, verified = rugcheck(m["addr"])
     else:
         ok, rc_notes, verified = goplus_base(m["addr"])
     if not ok:
-        log(f"RugCheck FAIL, skipped {m['symbol']}: {rc_notes}")
+        log(f"Safety FAIL, skipped {m['symbol']}: {rc_notes}")
+        REJECTED.add(m["addr"])
         state.alerted[m["addr"]] = m["mcap"]  # don't recheck the same rug every minute
         state.save()
+        log_candidate(kind, m, False, ["safety: " + rc_notes.split("REJECT: ")[-1]])
         return
-    # Strong setup = big move on heavy volume with buyers clearly outnumbering sellers -> urgent "act now" ping
+    if (prev is not None and not skip_dedupe and m["addr"] not in REJECTED
+            and kind in ("EARLY RUNNER", "RUNNER + REAL STORY", "BONDING-CURVE LOTTO")):
+        kind = "RE-ALERT (doubled)"
+        extra = ("LATE PING: this coin already pinged and has since DOUBLED. Higher reversal risk - "
+                 "CROOK's re-alert at $289K was the one that lost. Prefer SECOND LEG pings.\n" + extra)
     # ACT NOW only for coins that are verified safe, OFF the bonding curve and have survived 45+ min since
-    # migration (the new pool's age) - GOCARDS dumped -96% within 15 min of migrating.
-    strong = (verified and not on_bonding_curve(m) and m["age_h"] * 60 >= 45
+    # migration (the new pool's age) - GOCARDS dumped -96% within 15 min of migrating. Never on late re-alerts.
+    strong = (verified and not on_bonding_curve(m) and m["age_h"] * 60 >= 45 and kind != "RE-ALERT (doubled)"
               and m["chg_h1"] >= 100 and m["chg_m5"] >= 0 and m["buys_h1"] >= 1.5 * max(m["sells_h1"], 1)
               and m["vol_h1"] >= 50_000 and m["mcap"] <= 1_000_000)
+    if not strong and not state.under_cap():          # the hourly cap never blocks an ACT NOW
+        log(f"hourly alert cap reached, skipping {m['symbol']}")
+        log_candidate(kind, m, False, ["hourly cap"])
+        return
     if on_bonding_curve(m) and kind == "EARLY RUNNER":
         kind = "BONDING-CURVE LOTTO"
         extra = ("Still on pump.fun's bonding curve: highest-risk stage (most dumps happen at/just after "
@@ -404,36 +445,69 @@ def alert(state, kind, m, extra="", skip_dedupe=False):
         f"MCap {fmt_usd(m['mcap'])} | Liq {fmt_usd(m['liq'])} | Vol 1h {fmt_usd(m['vol_h1'])}\n"
         f"5m {m['chg_m5']:+.0f}% | 1h {m['chg_h1']:+.0f}% | buys/sells 1h {m['buys_h1']}/{m['sells_h1']} | age {m['age_h']:.1f}h\n"
         f"{rc_notes}\n{extra}\n"
-        f"BEFORE BUYING: check global fees >=1.5 SOL + bundlers/snipers on GMGN, paste CA into Coinbase.\n"
-        f"PLAN: max GBP50-100, sell half at 2x, hard stop -30%. Most of these die - it's a watch, not a promise."
+        f"BEFORE BUYING: tap GMGN - global fees >=1.5 SOL, bundlers/snipers low. Paste CA into Coinbase.\n"
+        f"PLAN: max GBP50-100, sell half at 2x, hard stop -30%. Add it to positions.txt for exit alerts."
     )
     if send_ntfy(title, body, click=m["url"] or None, priority="urgent" if strong else "high",
-                 tags="rotating_light,moneybag" if strong else "rotating_light"):
+                 tags="rotating_light,moneybag" if strong else "rotating_light", actions=check_links(m)):
         state.record(m["addr"], m["mcap"])
-        log_ping(kind if not strong else "ACT NOW", m)
+        log_ping(kind if not strong else "ACT NOW", m,
+                 dict({"verified": verified, "insider_warn": "WARN" in rc_notes}, **(flags or {})))
 
 
 # ----------------------------- loops -----------------------------
+GECKO_POLL_SECONDS = 120
+
+
+def gecko_trending_tokens():
+    """Extra discovery: GeckoTerminal's free trending pools (Solana + Base). DexScreener's 'latest' feeds only
+    list coins whose teams PAID for a profile/boost, so organic runners were invisible to the runner scan."""
+    out = {}
+    for net in ("solana", "base"):
+        try:
+            d = http_json(f"https://api.geckoterminal.com/api/v2/networks/{net}/trending_pools?page=1")
+        except Exception as e:
+            log(f"geckoterminal ({net}) unavailable: {e}")
+            continue
+        for pool in d.get("data") or []:
+            tid = ((((pool.get("relationships") or {}).get("base_token") or {}).get("data")) or {}).get("id", "")
+            if tid.startswith(net + "_"):          # id looks like "solana_<mint>" / "base_<0x...>"
+                out.setdefault(net, set()).add(tid.split("_", 1)[1])
+    return out
+
+
 async def runners_loop(state):
     loop = asyncio.get_running_loop()
+    last_gecko = 0
     while True:
         try:
             latest = await loop.run_in_executor(None, dex_latest_tokens)
+            if time.time() - last_gecko >= GECKO_POLL_SECONDS:
+                last_gecko = time.time()
+                gk = await loop.run_in_executor(None, gecko_trending_tokens)
+                for c, addrs in gk.items():
+                    latest[c] = list(set(latest.get(c, [])) | addrs)
             for chain, addrs in latest.items():
                 pairs = await loop.run_in_executor(None, dex_pairs_for_tokens, chain, addrs)
                 for p in pairs.values():
                     m = metrics(p)
-                    if (m["chain"] in CHAINS and m["mcap"] >= RUNNER_MIN_MCAP and m["vol_h1"] >= RUNNER_MIN_H1_VOLUME
-                            and m["chg_h1"] >= RUNNER_MIN_H1_CHANGE):
+                    near = (m["chain"] in CHAINS and m["mcap"] >= RUNNER_MIN_MCAP
+                            and m["vol_h1"] >= RUNNER_MIN_H1_VOLUME and m["chg_h1"] >= RUNNER_MIN_H1_CHANGE)
+                    if near:
                         WATCH[m["addr"]] = (time.time(), m["chain"])   # near-miss or ping -> second-leg watch
-                    if is_early_runner(m):
+                    reasons = runner_reasons(m)
+                    if not reasons:
                         story = real_world_match(m)
                         if story:
-                            await loop.run_in_executor(None, alert, state, "RUNNER + REAL STORY", m,
-                                                       f'REAL-WORLD STORY: matches trending "{story}" - these run '
-                                                       f'longer than random coins (TILCAYO, Super Inu pattern).')
+                            await loop.run_in_executor(None, lambda: alert(
+                                state, "RUNNER + REAL STORY", m,
+                                f'REAL-WORLD STORY: matches trending "{story}" - these run longer than random '
+                                f'coins (TILCAYO, Super Inu pattern).', flags={"story": story}))
                         else:
                             await loop.run_in_executor(None, alert, state, "EARLY RUNNER", m, "")
+                    elif near and m["addr"] not in state.alerted:
+                        # near-miss: don't ping, but track it so the scorecard shows what the filters cost us
+                        await loop.run_in_executor(None, log_candidate, "EARLY RUNNER", m, False, reasons)
             log(f"runner scan done ({sum(len(a) for a in latest.values())} fresh tokens checked)")
         except Exception as e:
             log(f"runner loop error: {e}")
@@ -673,9 +747,14 @@ async def keywords_loop(state):
                         best[m["addr"]] = m
             movers = sorted((m for m in best.values() if is_keyword_mover(m)), key=lambda m: -m["vol_h1"])
             for m in movers[:2]:
+                rivals = [n for n in best.values() if n["addr"] != m["addr"]
+                          and n["symbol"].lower() == m["symbol"].lower() and n["liq"] >= 5 * max(m["liq"], 1)]
+                if rivals:          # e.g. a $0-liquidity "Space Inu $SI" riding the real $SI
+                    log(f"skipped copycat ${m['symbol']} ({m['addr'][:6]}...) - bigger coin shares its ticker")
+                    continue
                 src = "your keywords.txt" if kw in manual else "auto (Trump posts / Google Trends / Wikipedia / AI routine)"
-                await loop.run_in_executor(None, alert, state, "CATALYST", m,
-                                           f'Matched trending phrase "{kw}" from {src}')
+                await loop.run_in_executor(None, lambda: alert(
+                    state, "CATALYST", m, f'Matched trending phrase "{kw}" from {src}', flags={"keyword": kw}))
             await asyncio.sleep(1.2)  # stay well under DexScreener's 300/min search limit
         await asyncio.sleep(KEYWORD_POLL_SECONDS)
 
@@ -968,12 +1047,24 @@ async def sleepers_loop(state):
         await asyncio.sleep(POLL_SECONDS)
 
 
-# ----------------------------- SCORECARD (learning loop) -----------------------------
-# Every ping is logged; the radar re-checks each coin's price over the next 24h (peak and 1h/6h/24h results)
-# and sends a daily scorecard, so we can tune the filters from REAL results instead of guesses.
+# ----------------------------- SCORECARD + PAPER TRADING (learning loop) -----------------------------
+# Every ping AND every near-miss the filters rejected ("shadow") is logged with its features, then tracked
+# every ~45s for 3h and every 10 min to 24h. Each one is paper-traded with the current rules plus two
+# alternatives, so the daily scorecard shows what the rules WOULD have made - and what the filters cost us.
+import threading
+
 PINGS_FILE = "pings_log.json"
 SCORECARD_HOUR = 21           # local time for the daily scorecard ping
 OUTCOME_CHECK_MINUTES = 10
+PAPER_STAKE_GBP = 50
+SHADOW_REPEAT_HOURS = 6
+STRATEGIES = {
+    "rules": {"stop": 0.70, "half_at": 2.0, "trail": 0.40, "label": "Current rules (half at 2x, stop -30%)"},
+    "wide": {"stop": 0.50, "half_at": 2.0, "trail": 0.40, "label": "Wider stop (-50%)"},
+    "quick": {"stop": 0.70, "all_at": 2.0, "label": "Sell everything at 2x"},
+}
+PINGS_LOCK = threading.Lock()
+SHADOW_SEEN = {}
 
 
 def _load_pings():
@@ -987,62 +1078,197 @@ def _load_pings():
 def _save_pings(pings):
     try:
         with open(os.path.join(HERE, PINGS_FILE), "w") as f:
-            json.dump(pings[-2000:], f, indent=1)
+            json.dump(pings[-3000:], f)
     except Exception as e:
         log(f"could not save pings log: {e}")
 
 
-def log_ping(kind, m):
-    pings = _load_pings()
-    pings.append({"t": time.time(), "kind": kind, "symbol": m["symbol"], "name": m["name"], "addr": m["addr"],
-                  "chain": m["chain"], "mcap": m["mcap"], "price": m["price"], "url": m["url"],
-                  "peak_x": 1.0, "x_1h": None, "x_6h": None, "x_24h": None})
-    _save_pings(pings)
+def _new_sim():
+    return {k: {"open": True, "frac": 1.0, "realised": 0.0, "peak": 1.0, "half": False, "stopped": False}
+            for k in STRATEGIES}
+
+
+def _sim_step(st, x, cfg):
+    """Advance one paper trade (1.0 = the stake) by one price sample x (= price / entry price)."""
+    if not st["open"] or x <= 0:
+        return
+    st["peak"] = max(st["peak"], x)
+    if "all_at" in cfg:
+        if x >= cfg["all_at"]:
+            st["realised"] += st["frac"] * cfg["all_at"]
+            st.update(frac=0.0, open=False, half=True)
+        elif x <= cfg["stop"]:
+            st["realised"] += st["frac"] * x      # sell at the price we actually see (gaps included)
+            st.update(frac=0.0, open=False, stopped=True)
+        return
+    if not st["half"]:
+        if x >= cfg["half_at"]:
+            st["realised"] += 0.5 * cfg["half_at"]
+            st.update(frac=0.5, half=True)
+        elif x <= cfg["stop"]:
+            st["realised"] += x
+            st.update(frac=0.0, open=False, stopped=True)
+            return
+    if st["half"] and x <= st["peak"] * (1 - cfg["trail"]):
+        st["realised"] += st["frac"] * x
+        st.update(frac=0.0, open=False)
+
+
+def _sim_value(st, last_x):
+    return st["realised"] + st["frac"] * (last_x or 0)
+
+
+def log_candidate(kind, m, pinged=True, reasons=None, flags=None):
+    now = time.time()
+    if not pinged:
+        if now - SHADOW_SEEN.get(m["addr"], 0) < SHADOW_REPEAT_HOURS * 3600:
+            return
+        SHADOW_SEEN[m["addr"]] = now
+    if not m.get("price"):
+        return
+    f = {"m5": round(m["chg_m5"], 1), "h1": round(m["chg_h1"], 1),
+         "bs": round(m["buys_h1"] / max(m["sells_h1"], 1), 2),
+         "liq_mc": round(m["liq"] / m["mcap"], 3) if m["mcap"] else 0, "age_h": round(m["age_h"], 2),
+         "curve": on_bonding_curve(m), "social": m["has_social"], "hour": datetime.now().hour, "dex": m["dex"]}
+    f.update(flags or {})
+    entry = {"t": now, "kind": kind, "pinged": pinged, "reasons": reasons or [], "symbol": m["symbol"],
+             "name": m["name"], "addr": m["addr"], "chain": m["chain"], "mcap": m["mcap"], "price": m["price"],
+             "url": m["url"], "f": f, "peak_x": 1.0, "trough_x": 1.0, "last_x": 1.0,
+             "x_1h": None, "x_6h": None, "x_24h": None, "sim": _new_sim(), "done": False}
+    with PINGS_LOCK:
+        pings = _load_pings()
+        pings.append(entry)
+        _save_pings(pings)
+
+
+def log_ping(kind, m, flags=None):
+    log_candidate(kind, m, True, None, flags)
+
+
+def update_prices(prices):
+    """prices: {addr: (price_usd, liquidity_usd)}. Advances every open (<24h) logged coin's paper trades."""
+    now = time.time()
+    with PINGS_LOCK:
+        pings = _load_pings()
+        changed = False
+        for p in pings:
+            if p.get("done") or not p.get("price"):
+                continue
+            age = now - p["t"]
+            if p["addr"] in prices and prices[p["addr"]][0]:
+                price, liq = prices[p["addr"]]
+                x = price / p["price"]
+                if liq < 1000:            # pool drained / rugged: you can't really sell
+                    x = min(x, 0.05)
+                p["last_x"] = round(x, 4)
+                p["peak_x"] = max(p.get("peak_x") or 1.0, x)
+                p["trough_x"] = min(p.get("trough_x") or 1.0, x)
+                sim = p.setdefault("sim", _new_sim())
+                for k, cfg in STRATEGIES.items():
+                    if k in sim:
+                        _sim_step(sim[k], x, cfg)
+                for key, secs in (("x_1h", 3600), ("x_6h", 6 * 3600), ("x_24h", 24 * 3600)):
+                    if p.get(key) is None and age >= secs:
+                        p[key] = round(x, 3)
+                changed = True
+            if age >= 24 * 3600 and (p["addr"] in prices or age >= 26 * 3600):
+                for st in (p.get("sim") or {}).values():
+                    if st["open"]:
+                        st["realised"] += st["frac"] * (p.get("last_x") or 0)
+                        st.update(frac=0.0, open=False)
+                p["done"] = True
+                changed = True
+        if changed:
+            _save_pings(pings)
+
+
+def _prices_from_pairs(pairs):
+    return {a: (float(pr.get("priceUsd") or 0), float((pr.get("liquidity") or {}).get("usd") or 0))
+            for a, pr in pairs.items()}
 
 
 def outcomes_update():
-    pings = _load_pings()
+    with PINGS_LOCK:
+        pings = _load_pings()
     now = time.time()
-    todo = [p for p in pings if p.get("price") and now - p["t"] <= 26 * 3600 and p.get("x_24h") is None]
     by_chain = {}
-    for p in todo:
-        by_chain.setdefault(p["chain"], []).append(p["addr"])
+    for p in pings:
+        if not p.get("done") and p.get("price") and now - p["t"] <= 26 * 3600:
+            by_chain.setdefault(p["chain"], set()).add(p["addr"])
+    prices = {}
     for chain, addrs in by_chain.items():
-        pairs = dex_pairs_for_tokens(chain, list(set(addrs)))
-        for p in todo:
-            pr = pairs.get(p["addr"])
-            if p["chain"] != chain or not pr:
-                continue
-            x = float(pr.get("priceUsd") or 0) / p["price"] if p["price"] else 0
-            p["peak_x"] = max(p.get("peak_x") or 1.0, x)
-            age = now - p["t"]
-            for key, secs in (("x_1h", 3600), ("x_6h", 6 * 3600), ("x_24h", 24 * 3600)):
-                if p.get(key) is None and age >= secs:
-                    p[key] = round(x, 3)
-    _save_pings(pings)
+        prices.update(_prices_from_pairs(dex_pairs_for_tokens(chain, list(addrs))))
+    update_prices(prices)
+
+
+def _pnl(p, k):
+    st = (p.get("sim") or {}).get(k)
+    return None if not st else (_sim_value(st, p.get("last_x", 1.0)) - 1) * PAPER_STAKE_GBP
+
+
+def _gbp(v):
+    return f"{'+' if v >= 0 else '-'}GBP{abs(v):.0f}"
 
 
 def scorecard_text(hours=24):
-    pings = [p for p in _load_pings() if time.time() - p["t"] <= hours * 3600]
-    if not pings:
+    allp = [p for p in _load_pings() if time.time() - p["t"] <= hours * 3600]
+    pings = [p for p in allp if p.get("pinged", True)]
+    shadow = [p for p in allp if not p.get("pinged", True)]
+    if not allp:
         return "No pings in the last 24h."
-    hit2 = [p for p in pings if (p.get("peak_x") or 0) >= 2]
-    hit5 = [p for p in pings if (p.get("peak_x") or 0) >= 5]
-    dead = [p for p in pings if p.get("x_6h") is not None and p["x_6h"] <= 0.5]
-    best = sorted(pings, key=lambda p: -(p.get("peak_x") or 0))[:5]
-    lines = [f"Pings: {len(pings)} | peaked 2x+: {len(hit2)} | 5x+: {len(hit5)} | -50% or worse by 6h: {len(dead)}",
-             "Best:"]
-    for p in best:
-        lines.append(f"- {p['kind']} ${p['symbol']} @ {fmt_usd(p['mcap'])}: peak {p.get('peak_x', 1):.1f}x, "
-                     f"6h {p.get('x_6h') or '-'}x")
-    by_kind = {}
+    hit2 = sum((p.get("peak_x") or 0) >= 2 for p in pings)
+    hit5 = sum((p.get("peak_x") or 0) >= 5 for p in pings)
+    stopped = sum(bool(((p.get("sim") or {}).get("rules") or {}).get("stopped")) for p in pings)
+    L = [f"PINGS {len(pings)} | peaked 2x+: {hit2} | 5x+: {hit5} | stopped out (-30%) before 2x: {stopped}",
+         f"PAPER TRADING (GBP{PAPER_STAKE_GBP} on every ping, approx.):"]
+    for k, cfg in STRATEGIES.items():
+        vals = [v for v in (_pnl(p, k) for p in pings) if v is not None]
+        if vals:
+            L.append(f"- {cfg['label']}: {_gbp(sum(vals))} | {sum(v > 0 for v in vals)}/{len(vals)} in profit")
+    kinds = {}
     for p in pings:
-        k = by_kind.setdefault(p["kind"], [0, 0])
+        k = kinds.setdefault(p["kind"], [0, 0, 0.0])
         k[0] += 1
         k[1] += (p.get("peak_x") or 0) >= 2
-    lines.append("By type (pings / hit 2x): " + ", ".join(f"{k} {v[0]}/{v[1]}" for k, v in by_kind.items()))
-    lines.append("Send this to Claude to tune the filters. (Peak = best price seen in 10-min checks.)")
-    return "\n".join(lines)
+        k[2] += _pnl(p, "rules") or 0
+    L.append("By type (pings / hit 2x / rules result): " +
+             "; ".join(f"{k} {v[0]}/{v[1]}/{_gbp(v[2])}" for k, v in kinds.items()))
+    if shadow:
+        s2 = [p for p in shadow if (p.get("peak_x") or 0) >= 2]
+        blocked = {}
+        for p in s2:
+            for r in p.get("reasons") or ["?"]:
+                blocked[r] = blocked.get(r, 0) + 1
+        L.append(f"FILTERED OUT: {len(shadow)} near-misses | {len(s2)} later hit 2x | if they'd pinged, "
+                 f"rules would have made {_gbp(sum(_pnl(p, 'rules') or 0 for p in shadow))}")
+        if blocked:
+            L.append("Filters that blocked the 2x ones: " +
+                     ", ".join(f"{r} x{n}" for r, n in sorted(blocked.items(), key=lambda kv: -kv[1])[:5]))
+    best = sorted(pings, key=lambda p: -(p.get("peak_x") or 0))[:3]
+    if best:
+        L.append("Best: " + "; ".join(f"{p['kind']} ${p['symbol']} peak {p.get('peak_x', 1):.1f}x "
+                                      f"(rules {_gbp(_pnl(p, 'rules') or 0)})" for p in best))
+    L.append("Send this to Claude to tune. (Sampled every ~45s for 3h, then every 10 min.)")
+    return "\n".join(L)
+
+
+def export_csv():
+    import csv
+    path = os.path.join(HERE, "pings_export.csv")
+    rows = _load_pings()
+    fkeys = sorted({k for r in rows for k in (r.get("f") or {})})
+    cols = ["time", "kind", "pinged", "symbol", "addr", "chain", "mcap", "peak_x", "trough_x", "x_1h", "x_6h",
+            "x_24h", "reasons"] + [f"f_{k}" for k in fkeys] + [f"pnl_{k}" for k in STRATEGIES]
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(cols)
+        for r in rows:
+            w.writerow([datetime.fromtimestamp(r["t"]).isoformat(timespec="minutes"), r.get("kind"),
+                        r.get("pinged", True), r.get("symbol"), r.get("addr"), r.get("chain"), round(r.get("mcap") or 0),
+                        r.get("peak_x"), r.get("trough_x"), r.get("x_1h"), r.get("x_6h"), r.get("x_24h"),
+                        "|".join(r.get("reasons") or [])] + [(r.get("f") or {}).get(k) for k in fkeys] +
+                       [round(_pnl(r, k) or 0, 2) for k in STRATEGIES])
+    return path
 
 
 async def scorecard_loop(state):
@@ -1058,6 +1284,93 @@ async def scorecard_loop(state):
         except Exception as e:
             log(f"scorecard error: {e}")
         await asyncio.sleep(OUTCOME_CHECK_MINUTES * 60)
+
+
+# ----------------------------- POSITION EXIT ALERTS -----------------------------
+# Exits are where money is made or lost (HOLDOWEEN, GOCARDS, CROOK). List what you hold in positions.txt as
+# "<contract address> <average cost in $>" (Coinbase shows "Average cost"). Checked every 30s:
+# 2x -> sell half | 3x -> sell another quarter | -30% before 2x -> stop | -40% from peak after 2x -> trail | 5-min dump.
+POSITIONS_FILE = "positions.txt"
+POS_STATE_FILE = "positions_state.json"
+POS_POLL_SECONDS = 30
+
+
+def load_positions():
+    out = []
+    try:
+        with open(os.path.join(HERE, POSITIONS_FILE), encoding="utf-8") as f:
+            for ln in f:
+                parts = ln.split("#")[0].split()
+                if len(parts) >= 2:
+                    try:
+                        out.append((parts[0], float(parts[1].replace("$", "").replace(",", ""))))
+                    except ValueError:
+                        pass
+    except FileNotFoundError:
+        pass
+    return out
+
+
+async def positions_loop(state):
+    loop = asyncio.get_running_loop()
+    try:
+        with open(os.path.join(HERE, POS_STATE_FILE)) as f:
+            pst = json.load(f)
+    except Exception:
+        pst = {}
+    while True:
+        try:
+            pos = load_positions()
+            if pos:
+                by_chain = {}
+                for addr, _ in pos:
+                    by_chain.setdefault("base" if addr.lower().startswith("0x") else "solana", []).append(addr)
+                found = {}
+                for c, addrs in by_chain.items():
+                    got = await loop.run_in_executor(None, dex_pairs_for_tokens, c, addrs)
+                    found.update({k.lower(): v for k, v in got.items()})
+                changed = False
+                for addr, cost in pos:
+                    pr = found.get(addr.lower())
+                    if not pr or cost <= 0:
+                        continue
+                    m = metrics(pr)
+                    x = m["price"] / cost
+                    s = pst.setdefault(f"{addr}|{cost}", {"peak": x, "done": [], "dump_t": 0})
+                    s["peak"] = max(s["peak"], x)
+                    sym, links = m["symbol"], check_links(m)
+
+                    def fire(ev, title, body):
+                        nonlocal changed
+                        if ev not in s["done"]:
+                            s["done"].append(ev)
+                            changed = True
+                            send_ntfy(title, body, click=m["url"] or None, priority="urgent",
+                                      tags="rotating_light,moneybag", actions=links)
+
+                    status = f"${sym} is {x:.2f}x your cost | MCap {fmt_usd(m['mcap'])} | 5m {m['chg_m5']:+.0f}%"
+                    if x >= 2:
+                        fire("2x", f"TAKE PROFIT: ${sym} hit 2x - sell HALF now",
+                             status + "\nSell half now = your whole stake back. The rest rides with a 40% trailing stop.")
+                    if x >= 3:
+                        fire("3x", f"${sym} hit 3x - sell another quarter", status)
+                    if x <= 0.70 and "2x" not in s["done"]:
+                        fire("stop", f"STOP: ${sym} is -{(1 - x) * 100:.0f}% - sell now",
+                             status + "\nHard stop -30% reached. Sell and move on - no hoping.")
+                    if "2x" in s["done"] and x <= s["peak"] * 0.6:
+                        fire("trail", f"TRAILING STOP: ${sym} is 40% off its peak - sell the rest", status)
+                    if dumping_now(m) and time.time() - s.get("dump_t", 0) > 600:
+                        s["dump_t"] = time.time()
+                        changed = True
+                        send_ntfy(f"DUMP WARNING: ${sym} - sells 2x buys in the last 5 min",
+                                  status + "\nInsiders may be exiting. Consider selling now.",
+                                  click=m["url"] or None, priority="urgent", tags="warning", actions=links)
+                if changed:
+                    with open(os.path.join(HERE, POS_STATE_FILE), "w") as f:
+                        json.dump(pst, f)
+        except Exception as e:
+            log(f"positions loop error: {e}")
+        await asyncio.sleep(POS_POLL_SECONDS)
 
 
 # ----------------------------- SECOND LEG (re-acceleration) -----------------------------
@@ -1087,8 +1400,10 @@ async def second_leg_loop(state):
             by_chain = {}
             for a, (_, c) in WATCH.items():
                 by_chain.setdefault(c, []).append(a)
+            price_updates = {}
             for chain, addrs in by_chain.items():
                 pairs = await loop.run_in_executor(None, dex_pairs_for_tokens, chain, addrs)
+                price_updates.update(_prices_from_pairs(pairs))
                 for addr, pr in pairs.items():
                     m = metrics(pr)
                     pace_5m = m["vol_h1"] / 12 if m["vol_h1"] else 0
@@ -1103,6 +1418,7 @@ async def second_leg_loop(state):
                             f"Re-accelerating NOW: 5-min volume {m['vol_m5']/pace_5m:.1f}x its recent pace, "
                             f"{m['buys_m5']}/{m['sells_m5']} buys/sells in 5 min. Legs like this can be caller-driven "
                             f"and reverse fast - tight stop.", skip_dedupe=True))
+            await loop.run_in_executor(None, update_prices, price_updates)   # paper trades, ~45s resolution
         except Exception as e:
             log(f"second-leg loop error: {e}")
         await asyncio.sleep(LEG_POLL_SECONDS)
@@ -1115,12 +1431,16 @@ async def main():
         outcomes_update()
         print(scorecard_text())
         return
+    if "--export" in sys.argv:
+        print("wrote " + export_csv())
+        return
     if "--test" in sys.argv:
         send_ntfy("Radar test", "Memecoin Radar is connected to your phone.", tags="white_check_mark")
         return
     await asyncio.gather(runners_loop(state), keywords_loop(state), graduations_loop(state),
                          smart_wallets_loop(state), sleepers_loop(state), x_vip_loop(state),
-                         scorecard_loop(state), second_leg_loop(state))
+                         scorecard_loop(state), second_leg_loop(state),
+                         positions_loop(state))
 
 
 if __name__ == "__main__":

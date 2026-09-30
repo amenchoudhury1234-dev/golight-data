@@ -1,0 +1,8 @@
+# EXIT ALERTS - list coins you actually hold, one per line:
+#   <contract address>  <average cost in $>
+# Copy "Average cost" from the coin's page in the Coinbase app. Example:
+#   B4KsyCAcB1hgXkswX8tmMJk4JX8aH2z5vWzZYSPgpump  0.0000593
+# The radar checks every 30 seconds and pings you (urgent) when to act:
+#   2x -> sell HALF | 3x -> sell another quarter | -30% before 2x -> STOP | 40% off the peak after 2x -> sell the rest
+#   plus a DUMP WARNING if sells are 2x buys in the last 5 minutes.
+# Delete the line when you've fully sold. You can also just tell your laptop Claude "I bought X at Y" to add it.

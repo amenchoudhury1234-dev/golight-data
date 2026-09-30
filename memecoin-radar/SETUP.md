@@ -66,8 +66,25 @@ Want more accounts, like WhaleInsider or WatcherGuru? Add them to `X_ACCOUNTS` i
 ## Sleeper coins (second waves)
 `sleepers.txt` lists "story coins" (Jimothy, Super Inu, Tilcayo, Rizzmas). These often pump **again** when a big account reposts their story without naming the coin. JIMOTHY did +331% after Elon posted a raccoon video. The radar checks them every minute and sends a **SLEEPER WAKING** ping when trading suddenly jumps. I'll add new story coins to the file as they appear.
 
-## Daily scorecard (automatic)
-The radar logs every ping and re-checks each coin over the next 24 hours: its peak, and its price after 1h, 6h and 24h. **Every evening at 21:00** you get a "Radar daily scorecard" ping showing how many pings hit 2x or 5x and how many died. You can also see it any time by running `python radar.py --scorecard` in the radar folder. Send the scorecard to Claude so the filters get tuned from real results.
+## Daily scorecard and paper trading (automatic)
+The radar **paper-trades every ping** with your rules (£50, half out at 2x, stop at −30%) and two alternatives (a wider −50% stop, and selling everything at 2x). It tracks each coin every ~45 seconds for 3 hours, then every 10 minutes for 24 hours.
+It also tracks **near-misses the filters rejected**, so we can see what the filters cost us (for example if the "5m dump" filter keeps blocking winners like CROOK).
+
+**Every evening at 21:00** you get a scorecard showing:
+- how many pings hit 2x or 5x, and how many got stopped out
+- **what the rules would have made in £**, compared with the alternatives
+- results by ping type (first ping, SECOND LEG, RE-ALERT, CATALYST...)
+- how many filtered-out coins later hit 2x, and which filters blocked them
+
+You can check it any time with `python radar.py --scorecard`. Run `python radar.py --export` to write `pings_export.csv` for a deeper analysis. Send both to Claude.
+
+## Exit alerts for coins you hold (positions.txt)
+When you buy something, add a line to `positions.txt`: `<contract address> <average cost in $>` (copy "Average cost" from Coinbase). The radar checks every 30 seconds and sends an **urgent** ping to: sell half at 2x, sell a quarter at 3x, **STOP at −30%**, sell the rest at 40% off the peak, plus a **DUMP WARNING** when sellers flood in. Delete the line when you've sold.
+
+## Ping labels
+- **RE-ALERT (doubled):** the coin already pinged and has since doubled. It's a late ping with higher risk; CROOK's re-alert was the one that lost.
+- **SECOND LEG:** a pinged coin is re-accelerating right now. So far these have been the better entries.
+- Each ping has **GMGN / Chart / RugCheck buttons**, so you can check fees, bundlers and insiders in one tap.
 
 ## When it pings
 1. Open the DexScreener link in the notification.

@@ -1,4 +1,6 @@
 x_token.txt
 radar_state.json
 pings_log.json
+positions_state.json
+pings_export.csv
 __pycache__/
