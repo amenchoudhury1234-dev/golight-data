@@ -1693,11 +1693,44 @@ def exit_add(mint, m, kind):
     if m.get("price"):
         EXITS[mint] = {"t": time.time(), "price": m["price"], "peak": m["price"], "kind": kind, "sent2x": False,
                        "rc2": False}
-        RC_TRACK[mint] = {"t": time.time(), "kind": kind, "done": set()}
+        RC_TRACK[mint] = {"t": time.time(), "kind": kind, "done": set(), "symbol": m.get("symbol", "?"),
+                          "name": m.get("name", "?"), "url": m.get("url", "")}
 
 
 RC_SNAP_S = (0, 45, 120, 300)
-RC_TRACK = {}   # mint -> {"t", "kind", "done": set of snapshot offsets taken}
+RC_TRACK = {}   # mint -> {"t", "kind", "done": set of snapshot offsets taken, "snaps": {offset: counts}}
+# Two sections (user idea, 1 Oct): at the ping WIRED (38x) and SHARED (rug) looked identical, so the split is made
+# 2 min later. TRUMP: holders 1,231 -> 2,325 in 2 min with 0 linked wallets; SHARED: 411 -> 456 in 45s.
+# "RUNNER SIGNS" = holders up 50%+ in 2 min and <=5 linked wallets; otherwise "QUICK FLIP". RECORD-ONLY: the label
+# goes to pings_log + the scorecard; the phone's 2x/FALLING pings only show the raw numbers.
+TIER_AT_S = 120
+TIER_MIN_HOLDER_GROWTH = 1.5
+TIER_MAX_LINKED = 5
+
+
+def _tier_read(mint, s):
+    h0, h2 = (s["snaps"].get(0) or [0, 0, 0]), (s["snaps"].get(TIER_AT_S) or [0, 0, 0])
+    if not (h0[2] and h2[2]):
+        return
+    growth, linked = h2[2] / h0[2], max(h0[1], h2[1])
+    tier = "RUNNER SIGNS" if growth >= TIER_MIN_HOLDER_GROWTH and linked <= TIER_MAX_LINKED else "QUICK FLIP"
+    _flag_ping(mint, s["kind"], tier=tier, holder_growth=round(growth, 2))
+    read = (f"Holders {h0[2]:,} -> {h2[2]:,} in 2 min (+{(growth - 1) * 100:.0f}%), "
+            f"{linked} linked insider wallets.")
+    if mint in EXITS:
+        EXITS[mint]["read"] = read
+    sym = s.get("symbol", mint[:6])
+    log(f"tier: ${sym} {tier} - holders x{growth:.2f}, {linked} linked")
+    # User asked to see it on the fast channel, colour-coded (ntfy can't colour text; the tag emoji is the colour).
+    m = {"name": s.get("name", sym), "symbol": sym, "addr": mint, "chain": "solana", "url": s.get("url", "")}
+    runner = tier == "RUNNER SIGNS"
+    send_ntfy(f"{tier}: ${sym}",
+              f"{read}\n" + ("Real buyers piling in, no insider cluster - looks like WIRED (38x) so far."
+                             if runner else
+                             "Slow holder growth or an insider cluster - looks like the quick rugs (SHARED, YAP).")
+              + f"\nEARLY READ, UNPROVEN: being tested until ~8 Oct (scorecard 'label' line).\nCA: {mint}",
+              click=coinbase_url(m), priority="high" if runner else "default",
+              tags="green_circle" if runner else "red_circle", actions=check_links(m), topic=FAST_TOPIC)
 
 
 def rc_counts(mint):
@@ -1800,7 +1833,11 @@ def exit_check():
             continue
         if now - s["t"] >= todo[0]:
             s["done"].add(todo[0])
-            _flag_ping(a, s["kind"], **{f"rc_{todo[0]}s": rc_counts(a)})
+            counts = rc_counts(a)
+            s.setdefault("snaps", {})[todo[0]] = counts
+            _flag_ping(a, s["kind"], **{f"rc_{todo[0]}s": counts})
+            if todo[0] == TIER_AT_S:
+                _tier_read(a, s)
             break                           # one RugCheck call per pass (~1/s limit)
     for a, p in dex_pairs_for_tokens("solana", list(EXITS)).items():
         e = EXITS.get(a)
@@ -1810,7 +1847,7 @@ def exit_check():
         e["peak"] = max(e["peak"], m["price"])
         x, peak_x, mins = m["price"] / e["price"], e["peak"] / e["price"], (now - e["t"]) / 60
         stats = (f"5m: {m['buys_m5']}/{m['sells_m5']} buys/sells, vol {fmt_usd(m['vol_m5'])} | "
-                 f"Liq {fmt_usd(m['liq'])}\nCA: {a}")
+                 f"Liq {fmt_usd(m['liq'])}\n" + (e["read"] + "\n" if e.get("read") else "") + f"CA: {a}")
         if not e["sent2x"] and x >= 2:
             e["sent2x"] = True
             send_ntfy(f"2x: ${m['symbol']} {fmt_usd(m['mcap'])} (x{x:.1f} since the ping)",
@@ -1848,7 +1885,10 @@ def exit_restore():
             continue
         if now - p["t"] < max(RC_SNAP_S) + 30:
             # snapshots whose moment passed during the restart are skipped, not taken late
-            RC_TRACK[p["addr"]] = {"t": p["t"], "kind": p["kind"],
+            RC_TRACK[p["addr"]] = {"t": p["t"], "kind": p["kind"], "symbol": p.get("symbol", "?"),
+                                   "name": p.get("name", "?"), "url": p.get("url", ""),
+                                   "snaps": {int(k[3:-1]): v for k, v in (p.get("f") or {}).items()
+                                             if k.startswith("rc_") and k.endswith("s") and k[3:-1].isdigit()},
                                    "done": {off for off in RC_SNAP_S
                                             if f"rc_{off}s" in (p.get("f") or {}) or now - p["t"] > off + 30}}
         if (now - p["t"] < EXIT_WATCH_MINUTES * 60
@@ -2743,6 +2783,10 @@ def scorecard_text(hours=24):
         cut = [p for p in fl if p["f"]["avg_trade"] < FAST_TEST_MIN_AVG_TRADE]
         tests.append(grp_line(f"FAST LOTTO avg trade <${FAST_TEST_MIN_AVG_TRADE} would skip", cut))
         tests.append(grp_line("2nd RugCheck would skip", [p for p in fl if p["f"].get("rc2_ok") is False]))
+        for tier in ("RUNNER SIGNS", "QUICK FLIP"):
+            grp = [p for p in fl if p["f"].get("tier") == tier]
+            if grp:
+                tests.append(grp_line(f"label {tier}", grp))
     if tests:
         L.append("TESTS (paper only, no pings): " + "; ".join(tests))
     best = sorted(pings, key=lambda p: -(p.get("peak_x") or 0))[:3]
