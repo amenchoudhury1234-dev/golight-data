@@ -93,7 +93,9 @@ def http_json(url, timeout=15):
 
 
 GECKO_LOCK = threading.Lock()
-GECKO_GAP_SECONDS = 4          # GeckoTerminal's free API returns 429 when calls come back to back
+# GeckoTerminal's free API returns 429 when calls come close together. 1 Oct overnight at a 4s gap: 44 x 429,
+# each one a 5-min back-off, so 676 calls were skipped - the trending/new-pool feeds were mostly OFF all night.
+GECKO_GAP_SECONDS = 8
 GECKO_BACKOFF_SECONDS = 300    # after a 429, leave it alone for 5 min
 _gecko = {"last": 0.0, "until": 0.0}
 
@@ -1336,8 +1338,12 @@ def launch_cluster_note(name, symbol, creator):
     import re
     now = time.time()
     _launch_history_io(now)
-    words = {w for w in re.findall(r"[a-z]{5,}", f"{name or ''} {symbol or ''}".lower())
-             if w not in LAUNCH_FILLER and w not in STOP}
+    # Words of 5+ letters from the name, plus the ticker itself from 4 letters: 1 Oct, "$SARP" copies launched
+    # across chains for 2 days and never counted (4 letters). The 6h-baseline spike rule keeps common tickers quiet.
+    words = {w for w in re.findall(r"[a-z]{5,}", (name or "").lower()) if w not in LAUNCH_FILLER and w not in STOP}
+    sym = re.sub(r"[^a-z]", "", (symbol or "").lower())
+    if len(sym) >= 4 and sym not in LAUNCH_FILLER and sym not in STOP:
+        words.add(sym)
     for w in words:
         _LAUNCH_WORDS.setdefault(w, {})[creator] = now
         recent, base, cluster = launch_spike(w, now)
@@ -1451,6 +1457,7 @@ async def graduations_loop(state):
     except ImportError:
         log("GRADUATIONS off: run  pip install websockets  to enable pump.fun migration alerts")
         return
+    import re
     import websockets
     loop = asyncio.get_running_loop()
 
@@ -1493,6 +1500,12 @@ async def graduations_loop(state):
                         for a in [a for a, v in STORY_LAUNCHES.items() if time.time() - v[0] > 3600]:
                             STORY_LAUNCHES.pop(a, None)
                         hit = story_launch_match(msg.get("name"), msg.get("symbol"))
+                        # Copies of a story coin already on the sleepers list (dozens of new "$SI" a night) can never
+                        # ping (alert() drops small copycats) - don't let them take watch slots. 1 Oct: the slots
+                        # were full of $SI copies when $SII launched at 03:52; it ran ~9x unwatched.
+                        tick = re.sub(r"[^A-Z0-9]", "", (msg.get("symbol") or "").upper())
+                        if hit and tick and tick in story_coin_symbols():
+                            hit = None
                         if hit and len(STORY_LAUNCHES) < STORY_LAUNCH_MAX_WATCH:
                             STORY_LAUNCHES[mint] = (time.time(), hit[0], hit[1])
                             log(f"story launch: ${msg.get('symbol')} matches \"{hit[0]}\" ({hit[1]}) - watching")
@@ -2266,7 +2279,7 @@ IGN_MIN_LIQ = 5_000             # (not checked on the bonding curve)
 IGN_NEW_HIGH = 0.95             # price must be within 5% of the highest we've seen in 30 min (breakout, not bounce)
 IGN_HOT_MINUTES = 90            # how long a coin stays on the fast watch
 IGN_MAX_HOT = 450
-GECKO_FAST_SECONDS = 90
+GECKO_FAST_SECONDS = 150         # with the 8s gap: ~2 GeckoTerminal calls/min in total, comfortably under the limit
 NURSERY_MINUTES = 60            # brand-new pump.fun launches, swept once a minute
 NURSERY_MAX = 1500
 NURSERY_PROMOTE_MCAP = 12_000   # a launch that gets past this goes onto the fast watch
@@ -2275,7 +2288,7 @@ STORY_LAUNCH_VIP_HOURS = 2     # a new coin named after something a VIP posted i
 STORY_LAUNCH_CHECKS_MIN = (3, 8, 15, 30)
 STORY_LAUNCH_MIN_MCAP = 15_000
 STORY_LAUNCH_MIN_BUYS_H1 = 40
-STORY_LAUNCH_MAX_WATCH = 60
+STORY_LAUNCH_MAX_WATCH = 200    # was 60 and filled up with $SI copies overnight (1 Oct) - see the create handler
 STORY_LAUNCHES = {}            # mint -> (time, phrase, source)
 
 HOT = {}        # addr -> (added_time, chain)
@@ -2397,19 +2410,21 @@ def ignition_reasons(m, snaps):
 
 
 def gecko_fast_tokens():
-    """GeckoTerminal: pools trending over the last 5 MINUTES + the newest pools (Solana + Base)."""
+    """GeckoTerminal: pools trending over the last 5 MINUTES (Solana + Base) + Base's newest pools. Solana's new
+    pump.fun coins already arrive instantly from PumpPortal, so Solana new_pools was a wasted call."""
     out = {}
-    for net in ("solana", "base"):
-        for path in ("trending_pools?duration=5m&page=1", "new_pools?page=1"):
-            try:
-                d = gecko_json(f"https://api.geckoterminal.com/api/v2/networks/{net}/{path}")
-            except Exception as e:
+    for net, path in (("solana", "trending_pools?duration=5m&page=1"), ("base", "trending_pools?duration=5m&page=1"),
+                      ("base", "new_pools?page=1")):
+        try:
+            d = gecko_json(f"https://api.geckoterminal.com/api/v2/networks/{net}/{path}")
+        except Exception as e:
+            if "backing off" not in str(e):          # one line per real failure, not one per skipped call
                 log(f"geckoterminal fast feed ({net}) unavailable: {e}")
-                continue
-            for pool in d.get("data") or []:
-                tid = ((((pool.get("relationships") or {}).get("base_token") or {}).get("data")) or {}).get("id", "")
-                if tid.startswith(net + "_"):
-                    out.setdefault(net, set()).add(tid.split("_", 1)[1])
+            continue
+        for pool in d.get("data") or []:
+            tid = ((((pool.get("relationships") or {}).get("base_token") or {}).get("data")) or {}).get("id", "")
+            if tid.startswith(net + "_"):
+                out.setdefault(net, set()).add(tid.split("_", 1)[1])
     return out
 
 
