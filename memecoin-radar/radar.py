@@ -1908,6 +1908,37 @@ def fast_early_paper(mint, m, rise, chg_ok=False):
                            "insider_net": "insider network" in notes})
 
 
+# Copycats (1 Oct): within minutes of WIRED's run (38x) dozens of "WIRED"/"WIREDCAT"/"WIREDINU"/"WDOG" coins
+# launched, and $SpaceX carried RugCheck's "Copycat token" risk. A copy of a coin that just ran is the classic quick
+# rug, so FAST LOTTO skips a coin whose name or ticker matches one already pinged in the last 12h (different
+# address) or that RugCheck calls a copycat. Skipped ones are paper-logged ("copycat") so the scorecard can check it.
+COPYCAT_HOURS = 12
+
+
+def _fast_copycat_of(m):
+    n, s = _flat(m["name"]), _flat(m["symbol"])
+    with PINGS_LOCK:
+        pings = _load_pings()
+    cut = time.time() - COPYCAT_HOURS * 3600
+    for p in reversed(pings):
+        if p["t"] < cut:
+            break
+        if p.get("pinged") and p.get("addr") != m["addr"]:
+            pn, ps = _flat(p.get("name")), _flat(p.get("symbol"))
+            if ((len(ps) >= 3 and ps in (s, n)) or (len(pn) >= 4 and pn == n)
+                    or (len(ps) >= 5 and (ps in s or ps in n))):     # WIREDCAT, WIREDINU, wiredworm
+                return p.get("symbol")
+    return None
+
+
+def _rc_copycat(mint):
+    try:
+        r = http_json(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report")    # same 5-min cache window upstream
+        return any("copycat" in str(x.get("name", "")).lower() for x in r.get("risks") or [])
+    except Exception:
+        return False
+
+
 def fast_lotto_check(mint, first_mcap):
     """One look at a freshly migrated coin. Returns (metrics, first_mcap) and pings if it's taking off."""
     p = dex_pairs_for_tokens("solana", [mint]).get(mint)
@@ -1942,6 +1973,11 @@ def fast_lotto_check(mint, first_mcap):
     if not ok:
         log(f"fast lotto: ${m['symbol']} taking off but failed safety: {notes.split('REJECT: ')[-1][:80]}")
         log_candidate("FAST LOTTO", m, False, ["safety"])
+        return first_mcap
+    copy_of = _fast_copycat_of(m) or ("RugCheck copycat" if _rc_copycat(mint) else None)
+    if copy_of:
+        log(f"fast lotto: ${m['symbol']} taking off but it's a copycat of {copy_of} - skipped (paper-logged)")
+        log_candidate("FAST LOTTO", m, False, ["copycat"], {"copy_of": copy_of})
         return first_mcap
     _FAST["n"] += 1
     body = (f"{m['name']} (${m['symbol']}) just moved off pump.fun and is TAKING OFF: {fmt_usd(first_mcap)} -> "
