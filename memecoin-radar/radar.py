@@ -1705,8 +1705,10 @@ RC_TRACK = {}   # mint -> {"t", "kind", "done": set of snapshot offsets taken, "
 # 2 min later. TRUMP: holders 1,231 -> 2,325 in 2 min with 0 linked wallets; SHARED: 411 -> 456 in 45s.
 # "REAL BUYERS" (green) = holders up 50%+ in 2 min and <=5 linked wallets; otherwise "QUICK FLIP" (red). Sent to the
 # fast channel marked UNPROVEN (user asked for it, colour-coded); results on the scorecard's "label" line.
-TIER_AT_S = 120
-TIER_MIN_HOLDER_GROWTH = 1.5
+# Was 120s / +50%: "will save us" pinged 22:33:56, FALLING at 22:34:47 (-67%), red label only at 22:36:03 - useless.
+# At 45s: TRUMP +29% holders (gave a 2.6x window), SHARED +11% and "will save us" +10% (rugs).
+TIER_AT_S = 45
+TIER_MIN_HOLDER_GROWTH = 1.2
 TIER_MAX_LINKED = 5
 
 
@@ -1719,12 +1721,13 @@ def _tier_read(mint, s):
     # 2.6x and faded - it means "more time to sell", not "will run like WIRED".
     tier = "REAL BUYERS" if growth >= TIER_MIN_HOLDER_GROWTH and linked <= TIER_MAX_LINKED else "QUICK FLIP"
     _flag_ping(mint, s["kind"], tier=tier, holder_growth=round(growth, 2))
-    read = (f"Holders {h0[2]:,} -> {h2[2]:,} in 2 min (+{(growth - 1) * 100:.0f}%), "
+    read = (f"Holders {h0[2]:,} -> {h2[2]:,} in {TIER_AT_S}s (+{(growth - 1) * 100:.0f}%), "
             f"{linked} linked insider wallets.")
-    if mint in EXITS:
-        EXITS[mint]["read"] = read
     sym = s.get("symbol", mint[:6])
     log(f"tier: ${sym} {tier} - holders x{growth:.2f}, {linked} linked")
+    if mint not in EXITS:          # FALLING already went out: a label now would only be noise
+        return
+    EXITS[mint]["read"] = read
     # User asked to see it on the fast channel, colour-coded (ntfy can't colour text; the tag emoji is the colour).
     m = {"name": s.get("name", sym), "symbol": sym, "addr": mint, "chain": "solana", "url": s.get("url", "")}
     runner = tier == "REAL BUYERS"
