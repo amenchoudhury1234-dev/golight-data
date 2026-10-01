@@ -641,6 +641,19 @@ def _coin_brief(kind, m, extra, rc_notes, flags):
     return "\n".join(lines)
 
 
+AI_MIN_CONFIDENCE = 3   # 1 Oct: "Three Falcons" got PING at 2/5 (48 linked insider wallets) and dumped ~90% in minutes
+
+
+def _min_confidence(out):
+    """A half-hearted PING (1-2/5) is treated as a SKIP."""
+    try:
+        if out.get("verdict") == "PING" and int(out.get("confidence") or 0) < AI_MIN_CONFIDENCE:
+            return dict(out, verdict="SKIP", reason=f"low confidence ({out.get('confidence')}/5): {out.get('reason', '')}")
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
 def ai_judge(kind, m, extra, rc_notes, flags):
     """Returns dict(verdict, confidence, reason, main_risk) or None if the judge is off/unavailable."""
     client = _ai_client()
@@ -686,7 +699,7 @@ def ai_judge(kind, m, extra, rc_notes, flags):
         return None
     log(f"AI judge ${m['symbol']}: {out['verdict']} ({out['confidence']}/5) {out['reason']} "
         f"[today {rec['calls']} checks, ${rec['usd']:.2f}]")
-    return out
+    return _min_confidence(out)
 
 
 DEEP_SYSTEM = JUDGE_SYSTEM + """
@@ -739,7 +752,7 @@ def ai_deep_check(kind, m, extra, rc_notes, flags):
         return None
     log(f"AI deep check ${m['symbol']}: {out['verdict']} ({out.get('confidence')}/5) {out.get('reason')} | "
         f"seen: {out.get('sources_found', '?')} [{searches} searches; today {rec['calls']} checks, ${rec['usd']:.2f}]")
-    return out
+    return _min_confidence(out)
 
 
 SERIAL_COPY_MIN = 5          # this many coins with the same ticker on the chain = a copy wave
@@ -2400,7 +2413,11 @@ def story_launch_match(name, symbol):
     now = time.time()
     for t, acct, text in reversed(RECENT_VIP):
         if now - t <= STORY_LAUNCH_VIP_HOURS * 3600 and acct not in X_FEED_ACCOUNTS:
+            routine = VIP_ROUTINE_WORDS.get(acct, set()) | COMMON_WORDS
+            norm = lambda w: w[:-1] if w.endswith("s") and len(w) > 4 else w
             for ph in vip_phrases(text):
+                if {norm(w) for w in ph.split()} <= routine:
+                    continue          # "three falcons" from a routine SpaceX post isn't a meme
                 if len(ph) >= 4 and _launch_matches(ph, lite):
                     return ph, f"@{acct} post {(now - t) / 60:.0f} min ago"
     if AUTO is not None:
