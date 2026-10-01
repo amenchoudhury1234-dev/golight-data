@@ -1701,6 +1701,23 @@ def x_get(path, token):
         return json.loads(r.read().decode())
 
 
+# 1 Oct: Elon's "Three Falcons ready to fly simultaneously" pinged $READY and $three - everyday words, nothing to do
+# with the post. A single word only counts if it's NOT a common English word (animals, names, memes still count).
+COMMON_WORDS = set("""one two three four five six seven eight nine ten hundred thousand million billion first second
+third last next new old big small great good best better bad worse worst ready set go going gone come coming back
+today tomorrow yesterday tonight week weeks month year years time times day days night morning soon now later
+just very really much many more most less few lot lots all any some every each other another same different
+make made making take took taking give gave get got getting keep kept put let say said tell told think thought
+know knew want need like love look looks see seen watch work works working play live life world people person
+man men woman women thing things way ways part place home house team game games news true false real fact
+yes no not never ever always maybe probably sure right left high low long short fast slow hard easy free full
+open close closed start started end ended done fly flying flight launch launched launching simultaneously
+amazing awesome incredible cool nice wow huge massive major important interesting exactly absolutely
+company business market money price stock stocks deal deals plan plans report update support system service
+power energy water fire earth space future past present history order orders law laws rule rules vote votes
+country nation state states city america american president government house senate congress""".split())
+
+
 def vip_phrases(text):
     import re
     text = re.sub(r"https?://\S+", " ", text)   # drop links
@@ -1714,7 +1731,7 @@ def vip_phrases(text):
     words = [w for w in _clean(text).lower().split() if len(w) >= 4 and w not in STOP]
     if len(words) <= 5:
         phrases.update(words)
-    return {p for p in phrases if 2 <= len(p) <= 40}
+    return {p for p in phrases if 2 <= len(p) <= 40 and not (" " not in p and p.lower() in COMMON_WORDS)}
 
 
 def _post_age_min(post):
@@ -1860,7 +1877,9 @@ async def x_vip_loop(state):
                         AUTO.seen[ph] = now      # newest = searched first, every 3 minutes
                 matches = []
                 routine = VIP_ROUTINE_WORDS.get(name, set())
-                search = [p for p in phrases if not set(p.split()) <= routine][:6]
+                norm = lambda w: w[:-1] if w.endswith("s") and len(w) > 4 else w    # "falcons" = "falcon"
+                search = [p for p in phrases if not {norm(w) for w in p.split()} <= routine
+                          and not {norm(w) for w in p.split()} <= (routine | COMMON_WORDS)][:6]
                 # all phrase searches at once (was one per second): the phone buzzes ~5s sooner after a VIP post
                 results = await asyncio.gather(*(loop.run_in_executor(None, dex_search, ph) for ph in search))
                 for ph, pairs in zip(search, results):
@@ -1875,6 +1894,18 @@ async def x_vip_loop(state):
                     if m["addr"] not in best or m["vol_h24"] > best[m["addr"]][1]["vol_h24"]:
                         best[m["addr"]] = (ph, m)
                 top = sorted(best.values(), key=lambda x: -x[1]["vol_h24"])[:3]
+                judged = []
+                for ph, m in top[:2]:      # AI: is the post really ABOUT what this coin is named after?
+                    v = await loop.run_in_executor(None, ai_judge, "X VIP MATCH", m,
+                                                   f'@{name} just posted: "{text[:240]}". The radar matched the word '
+                                                   f'"{ph}" to this coin. PING only if the post is clearly about the '
+                                                   f'thing/animal/character/meme the coin is named after.',
+                                                   "not checked yet (VIP heads-up)", {"story": ph})
+                    if v is None or v["verdict"] == "PING":
+                        judged.append((ph, m))
+                    else:
+                        log(f"VIP match skipped by AI: ${m['symbol']} ('{ph}') - {v['reason']}")
+                top = judged
                 if top:
                     lines = "\n".join(f'- "{ph}" -> {m["name"]} ${m["symbol"]} {fmt_usd(m["mcap"])} | vol 24h '
                                       f'{fmt_usd(m["vol_h24"])} | 1h {m["chg_h1"]:+.0f}% | CA {m["addr"]}'
