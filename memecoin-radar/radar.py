@@ -648,8 +648,9 @@ def ai_judge(kind, m, extra, rc_notes, flags):
         return None
     today = _ai_usage()
     if today["calls"] >= AI_MAX_CALLS_PER_DAY or today["usd"] >= AI_DAILY_BUDGET_USD:
-        log(f"AI judge: daily budget reached (${today['usd']:.2f}) - pinging without it")
-        return None
+        log(f"AI judge: daily budget reached (${today['usd']:.2f}) - unchecked story/momentum pings are held back")
+        return "BUDGET"
+    import anthropic
     import anthropic
     req = dict(model=AI_MODEL, max_tokens=4000, system=JUDGE_SYSTEM,
                output_config={"effort": AI_EFFORT, "format": {"type": "json_schema", "schema": JUDGE_SCHEMA}},
@@ -741,6 +742,24 @@ def ai_deep_check(kind, m, extra, rc_notes, flags):
     return out
 
 
+SERIAL_COPY_MIN = 5          # this many coins with the same ticker on the chain = a copy wave
+
+
+def serial_copies(m):
+    """(how many coins share this exact ticker on this chain, is THIS one the most traded of them?)."""
+    tick = m["symbol"].replace("$", "").strip().upper()
+    if not tick:
+        return 0, True
+    try:
+        same = [metrics(p) for p in dex_search(tick)]
+    except Exception:
+        return 0, True
+    same = [s for s in same if s["chain"] == m["chain"] and s["symbol"].replace("$", "").strip().upper() == tick]
+    addrs = {s["addr"] for s in same} | {m["addr"]}
+    top = max(same + [m], key=lambda s: s["vol_h1"])
+    return len(addrs), top["addr"] == m["addr"]
+
+
 def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     reals = story_coin_symbols().get(m["symbol"].lstrip("$").upper()) or set()
     if reals and m["addr"] not in reals:
@@ -793,7 +812,21 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
                  "migration). Lottery size only, or wait for it to migrate and hold 45+ min.\n" + extra)
     if not verified:
         extra = "SAFETY UNVERIFIED - check GMGN (bundlers/insiders/top10) before anything.\n" + extra
+    copies, leader = serial_copies(m)
+    if copies >= SERIAL_COPY_MIN and not leader:
+        # 1 Oct: "IGNITION $SIC $21K" pinged - the 25th+ "Super Intelligence Cat" in 14h; the original was dead at $2K
+        log(f"skipped serial copy ${m['symbol']} ({m['addr'][:6]}...) - {copies} coins share this ticker, "
+            "another one is trading more")
+        log_candidate(kind, m, False, [f"serial copy ({copies} with this ticker)"], flags)
+        return
     verdict = ai_judge("ACT NOW" if strong else kind, m, extra, rc_notes, flags)
+    if verdict == "BUDGET":
+        verdict = None
+        # 1 Oct: the $0.50 AI budget was used up by 07:57 and the copy above went out unchecked. Without the AI
+        # only the strongest signals still ping (VIP contract addresses and listings never come through here).
+        if kind not in ("SLEEPER WAKING", "SMART MONEY", "NEWS MENTION"):
+            log_candidate(kind, m, False, ["AI budget used - held back"], flags)
+            return
     # A fresh Elon/Trump/VIP post IS the cross-check - skip the slow web search (up to ~60s) so the ping is fast.
     vip_fresh = "x-vip" in srcs or str((flags or {}).get("launch_src", "")).startswith("@")
     if (verdict and verdict["verdict"] == "PING" and not vip_fresh
@@ -1399,7 +1432,11 @@ class AutoKeywords:
                 self.add(ph, source, now)
                 found.add(ph)
         for ph, outlets in harvest_news().items():
-            self.add(ph, "news-multi" if len(outlets) >= 2 else "news", now)
+            # 1 Oct: single headline words ("dollars", "nation", "micro", "build", "revenue") counted as strong
+            # stories, matched random coin names and burned the whole $0.50 AI budget by 08:00. A one-word news
+            # phrase is now weak (needs a second source); multi-word phrases from 2+ outlets stay strong.
+            multi = len(outlets) >= 2 and len(ph.split()) >= 2
+            self.add(ph, "news-multi" if multi else "news", now)
             found.add(ph)
         cutoff = now - AUTO_KEYWORD_TTL_HOURS * 3600
         self.seen = {k: v for k, v in self.seen.items() if v >= cutoff}
