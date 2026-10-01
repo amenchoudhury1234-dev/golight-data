@@ -1808,8 +1808,29 @@ EXIT_POLL_S = 5   # follow-ups look every 5s (was 15: MUSE's FALLING ping came a
                   # live trade stream needs an API key funded from a SOL wallet - not used (no wallets, user rule).
 
 
+def exit_restore():
+    """Follow-ups lived only in memory: the 21:12 restart on 1 Oct dropped Alonmas's (it then went 9x -> 0.04x with no
+    FALLING ping). Rebuild them from pings_log for fast-channel pings still inside the watch window."""
+    now = time.time()
+    with PINGS_LOCK:
+        pings = _load_pings()
+    for p in pings:
+        if (p.get("pinged") and p.get("kind") in ("FAST LOTTO", "EARLY STORY") and p.get("price")
+                and now - p["t"] < EXIT_WATCH_MINUTES * 60
+                and (p.get("last_x") or 1) > (1 - EXIT_DROP_AFTER_2X) * (p.get("peak_x") or 1)):  # not already crashed
+            EXITS[p["addr"]] = {"t": p["t"], "price": p["price"], "peak": p["price"] * (p.get("peak_x") or 1),
+                                "kind": p["kind"], "sent2x": (p.get("peak_x") or 1) >= 2, "rc2": True}
+    if EXITS:
+        names = {p["addr"]: p["symbol"] for p in pings if p.get("addr") in EXITS}
+        log(f"follow-ups restored after restart: {', '.join(names.values())}")
+
+
 async def early_story_loop(state):
     loop = asyncio.get_running_loop()
+    try:
+        exit_restore()
+    except Exception as e:
+        log(f"exit_restore error: {e}")
     last_slow = 0.0
     while True:
         fns = [exit_check]
@@ -2433,6 +2454,8 @@ STRATEGIES = {
     "rules": {"stop": 0.70, "half_at": 2.0, "trail": 0.40, "label": "Stop rules (half at 2x, stop -30%)"},
     "wide": {"stop": 0.50, "half_at": 2.0, "trail": 0.40, "label": "Wider stop (-50%)"},
     "quick": {"stop": 0.70, "all_at": 2.0, "label": "Sell everything at 2x"},
+    # 1 Oct: all 7 FAST LOTTO coins ended as rugs (0.03-0.08x); several peaked at 1.5-1.7x before dumping
+    "quick15": {"stop": 0.70, "all_at": 1.5, "label": "Sell everything at 1.5x"},
     "lotto": {"stop": 0.0, "half_at": 2.0, "trail": 0.50, "label": "Lotto (no stop, half at 2x, trail 50%)"},
     "moonbag": {"stop": 0.0, "half_at": 2.0, "trail": 0.50, "bag": 0.15,
                 "label": "Moonbag (lotto, but keep 15% forever)"},
