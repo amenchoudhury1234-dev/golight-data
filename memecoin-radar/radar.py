@@ -1554,9 +1554,10 @@ def _fast_bar(age_min):
 # "𝕏 Accelerationism" ($𝕏/ACC) ran $32K -> $246K in ~15 min after Elon's "super intelligence" post. The radar logged
 # an "accelerationism" launch cluster at 19:03, 7 min before its FAST LOTTO ping at $62K, but nothing linked the two.
 # A HOT THEME = a launch-cluster word or a phrase from a VIP post in the last hour. A coin named after one is:
-#  - watched every 15s while still on pump.fun and pinged as EARLY STORY (fast channel) when it leads its theme on
-#    buying, after the same RugCheck (RugCheck leaves pump.fun's own curve account out of the holder count);
-#  - let through a lower FAST LOTTO bar after migration, tagged "+ STORY". Coins with no theme: rule unchanged.
+#  - watched every 15s while still on pump.fun; when it leads its theme on buying and passes RugCheck (which leaves
+#    pump.fun's own curve account out of the holder count) it's logged as EARLY STORY - paper only while
+#    EARLY_PINGS is False;
+#  - tagged "FAST LOTTO + STORY" if it then passes the normal FAST LOTTO bar after migration.
 # Every FAST LOTTO / EARLY STORY ping then gets follow-ups for an hour: one at 2x (the sell-half point) and one if it
 # falls 30% from its peak (LEAFRA did 1.54x, then -92% within minutes).
 THEME_MINUTES = 60
@@ -1568,9 +1569,13 @@ EARLY_MIN_BUYS_M5 = 40
 EARLY_MIN_VOL_M5 = 5_000
 EARLY_MIN_M5_CHANGE = 15
 EARLY_MAX_PER_DAY = 8
-FAST_STORY_MIN_MCAP = 40_000     # a theme coin may ping from $40K (𝕏/ACC moved off pump.fun at $32K)
-FAST_STORY_MIN_RISE = 1.2
-FAST_STORY_BAR = 0.7             # x the normal buys/volume bar
+EARLY_PINGS = False              # user, 1 Oct: "rather be a bit more accurate" - EARLY STORY is paper-tracked only
+                                 # (scorecard kind "EARLY STORY") until it proves itself; FAST LOTTO still pings
+# Same bar as FAST LOTTO for theme coins: the theme only adds the "+ STORY" label (𝕏/ACC passed the normal bar at
+# $62K). Lower these (e.g. 40_000 / 1.2 / 0.7) to let theme coins ping sooner.
+FAST_STORY_MIN_MCAP = FAST_MIN_MCAP
+FAST_STORY_MIN_RISE = FAST_MIN_RISE
+FAST_STORY_BAR = 1.0             # x the normal buys/volume bar
 EXIT_WATCH_MINUTES = 60
 EXIT_DROP_FROM_PEAK = 0.30
 THEMES = {}                      # theme -> (last seen, source)
@@ -1659,6 +1664,10 @@ def early_check():
         if not ok:
             log(f"early story: ${m['symbol']} taking off but failed safety: {notes.split('REJECT: ')[-1][:80]}")
             log_candidate("EARLY STORY", m, False, ["safety"], {"story": theme})
+            continue
+        if not EARLY_PINGS:   # paper only: the scorecard shows whether these would have paid; FAST LOTTO may still ping
+            log(f'early story (paper only, no ping): ${m["symbol"]} {fmt_usd(m["mcap"])} leading "{theme}"')
+            log_candidate("EARLY STORY", m, False, ["paper only"], {"story": theme, "launch_src": src})
             continue
         _EARLY["n"] += 1
         _FAST["seen"].add(a)                 # no second ping as FAST LOTTO when it migrates
