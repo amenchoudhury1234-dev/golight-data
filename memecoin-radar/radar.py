@@ -600,7 +600,8 @@ def story_backing(flags):
     if phrase in load_keywords():
         srcs.add("manual")
     strong = bool(srcs & STRONG_SOURCES) or len(srcs & WEAK_SOURCES) >= 2
-    if " " not in phrase.strip() and not phrase.startswith("@") and len(srcs) < 2 and "manual" not in srcs:
+    if (" " not in phrase.strip() and not phrase.startswith("@") and len(srcs) < 2
+            and not srcs & {"manual", "x-vip"}):      # a VIP's own X post (raccoon emoji etc.) still counts alone
         strong = False      # one word from one source ("industries" in one Trump post) isn't a story
     return phrase, sorted(srcs), strong
 
