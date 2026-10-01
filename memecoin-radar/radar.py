@@ -1697,7 +1697,9 @@ def exit_add(mint, m, kind):
                           "name": m.get("name", "?"), "url": m.get("url", "")}
 
 
-RC_SNAP_S = (0, 45, 120, 300)
+# Extended to 10 and 15 min (1 Oct): WIRED (38x), TRUMP (2.6x, faded) and SHARED (rug) looked the same at the ping;
+# the difference shows in the first 5-15 min. Each snapshot also records price vs ping and 5-min buys/sells.
+RC_SNAP_S = (0, 45, 120, 300, 600, 900)
 RC_TRACK = {}   # mint -> {"t", "kind", "done": set of snapshot offsets taken, "snaps": {offset: counts}}
 # Two sections (user idea, 1 Oct): at the ping WIRED (38x) and SHARED (rug) looked identical, so the split is made
 # 2 min later. TRUMP: holders 1,231 -> 2,325 in 2 min with 0 linked wallets; SHARED: 411 -> 456 in 45s.
@@ -1838,7 +1840,12 @@ def exit_check():
             s["done"].add(todo[0])
             counts = rc_counts(a)
             s.setdefault("snaps", {})[todo[0]] = counts
-            _flag_ping(a, s["kind"], **{f"rc_{todo[0]}s": counts})
+            mk = {}
+            p_ = dex_pairs_for_tokens("solana", [a]).get(a)
+            if p_:
+                mm = metrics(p_)
+                mk = {f"mk_{todo[0]}s": [round(mm["mcap"]), mm["buys_m5"], mm["sells_m5"]]}
+            _flag_ping(a, s["kind"], **{f"rc_{todo[0]}s": counts}, **mk)
             if todo[0] == TIER_AT_S:
                 _tier_read(a, s)
             break                           # one RugCheck call per pass (~1/s limit)
