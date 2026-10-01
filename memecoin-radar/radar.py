@@ -955,7 +955,7 @@ def load_keywords():
 
 AUTO_KEYWORD_TTL_HOURS = 48
 KW_TOPIC = "scout-kw-c639f2f6f2bd1f4401"
-MEM_TOPIC = "scout-mem-c639f2f6f2bd1f4401"   # shared memory of pinged coins (the cloud routine re-publishes it)   # the hourly Claude routine publishes AI-picked phrases here
+MEM_TOPIC = "scout-mem-c639f2f6f2bd1f4401"   # shared memory of pinged coins (the cloud routine re-publishes it)
 TRUMP_FEED = "https://trumpstruth.org/feed"  # public RSS mirror of Trump's Truth Social posts
 
 STOP = set("""the a an and or of to in on for with at by from is are was were be been it this that
