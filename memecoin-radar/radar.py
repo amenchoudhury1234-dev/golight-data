@@ -1693,9 +1693,11 @@ def exit_add(mint, m, kind):
     if m.get("price"):
         EXITS[mint] = {"t": time.time(), "price": m["price"], "peak": m["price"], "kind": kind, "sent2x": False,
                        "rc2": False}
+        RC_TRACK[mint] = {"t": time.time(), "kind": kind, "done": set()}
 
 
 RC_SNAP_S = (0, 45, 120, 300)
+RC_TRACK = {}   # mint -> {"t", "kind", "done": set of snapshot offsets taken}
 
 
 def rc_counts(mint):
@@ -1779,7 +1781,7 @@ def exit_check():
     now = time.time()
     for a in [a for a, e in EXITS.items() if now - e["t"] > EXIT_WATCH_MINUTES * 60]:
         EXITS.pop(a, None)
-    if not EXITS:
+    if not EXITS and not RC_TRACK:
         return
     for a, e in list(EXITS.items()):      # record-only test: a fresh RugCheck 45s after the ping
         if not e["rc2"] and now - e["t"] >= 45:
@@ -1787,15 +1789,19 @@ def exit_check():
             _rc_cache.pop(a, None)
             ok2, notes2, _ = rugcheck(a)
             _flag_ping(a, e["kind"], rc2_ok=ok2, rc2_insider_net="insider network" in notes2)
-        # record-only: when do linked wallets show up? (1 Oct, now: runners WIRED/Alonmas/𝕏/ACC had 4/0/0 linked
-        # wallets and 800-4,100 holders; rugs Heinrich/YAP/LEAFRA/MUSE had 235/135/33/16 and 235-814 holders -
-        # but at the ping most showed none). Snapshot at 0s, 45s, 2 min and 5 min after the ping.
-        done = e.setdefault("rcs", set())
-        for off in RC_SNAP_S:
-            if off not in done and now - e["t"] >= off:
-                done.add(off)
-                _flag_ping(a, e["kind"], **{f"rc_{off}s": rc_counts(a)})
-                break                       # one RugCheck call per pass (~1/s limit)
+    # record-only: when do linked wallets show up? (1 Oct, now: runners WIRED/Alonmas/𝕏/ACC had 4/0/0 linked
+    # wallets and 800-4,100 holders; rugs Heinrich/YAP/LEAFRA/MUSE had 235/135/33/16 and 235-814 holders -
+    # but at the ping most showed none). Snapshot at 0s, 45s, 2 min and 5 min after the ping. Kept apart from EXITS:
+    # a FALLING ping ends the follow-ups, but the rugs' 2/5-min snapshots are the ones we need most ($SHARED).
+    for a, s in list(RC_TRACK.items()):
+        todo = [off for off in RC_SNAP_S if off not in s["done"]]
+        if not todo:
+            RC_TRACK.pop(a, None)
+            continue
+        if now - s["t"] >= todo[0]:
+            s["done"].add(todo[0])
+            _flag_ping(a, s["kind"], **{f"rc_{todo[0]}s": rc_counts(a)})
+            break                           # one RugCheck call per pass (~1/s limit)
     for a, p in dex_pairs_for_tokens("solana", list(EXITS)).items():
         e = EXITS.get(a)
         m = metrics(p)
@@ -1838,14 +1844,17 @@ def exit_restore():
     with PINGS_LOCK:
         pings = _load_pings()
     for p in pings:
-        if (p.get("pinged") and p.get("kind") in ("FAST LOTTO", "EARLY STORY") and p.get("price")
-                and now - p["t"] < EXIT_WATCH_MINUTES * 60
+        if not (p.get("pinged") and p.get("kind") in ("FAST LOTTO", "EARLY STORY") and p.get("price")):
+            continue
+        if now - p["t"] < max(RC_SNAP_S) + 30:
+            # snapshots whose moment passed during the restart are skipped, not taken late
+            RC_TRACK[p["addr"]] = {"t": p["t"], "kind": p["kind"],
+                                   "done": {off for off in RC_SNAP_S
+                                            if f"rc_{off}s" in (p.get("f") or {}) or now - p["t"] > off + 30}}
+        if (now - p["t"] < EXIT_WATCH_MINUTES * 60
                 and (p.get("last_x") or 1) > (1 - EXIT_DROP_AFTER_2X) * (p.get("peak_x") or 1)):  # not already crashed
             EXITS[p["addr"]] = {"t": p["t"], "price": p["price"], "peak": p["price"] * (p.get("peak_x") or 1),
-                                "kind": p["kind"], "sent2x": (p.get("peak_x") or 1) >= 2, "rc2": True,
-                                # snapshots whose moment passed during the restart are skipped, not taken late
-                                "rcs": {off for off in RC_SNAP_S
-                                        if f"rc_{off}s" in (p.get("f") or {}) or now - p["t"] > off + 30}}
+                                "kind": p["kind"], "sent2x": (p.get("peak_x") or 1) >= 2, "rc2": True}
     if EXITS:
         names = {p["addr"]: p["symbol"] for p in pings if p.get("addr") in EXITS}
         log(f"follow-ups restored after restart: {', '.join(names.values())}")
