@@ -867,6 +867,13 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     if send_ntfy(title, body, click=coinbase_url(m), priority="urgent" if strong else "high",
                  tags="rotating_light,moneybag" if strong else "rotating_light", actions=check_links(m)):
         state.record(m["addr"], m["mcap"])
+        try:   # tell the cloud Catalyst routine we pinged this coin, so it doesn't re-alert it as "new"
+            urllib.request.urlopen(urllib.request.Request(
+                f"https://ntfy.sh/{MEM_TOPIC}", method="POST", headers=UA,
+                data=f"{m['addr']}|{m['symbol']}|{int(m['mcap'])}|{time.strftime('%Y-%m-%dT%H:%MZ', time.gmtime())}|{kind}".encode()),
+                timeout=10)
+        except Exception:
+            pass
         log_ping(kind if not strong else "ACT NOW", m,
                  dict({"verified": verified, "insider_warn": "WARN" in rc_notes}, **flags))
 
@@ -947,7 +954,8 @@ def load_keywords():
 # then check DexScreener for a Solana/Base coin with that name/ticker that is starting to move.
 
 AUTO_KEYWORD_TTL_HOURS = 48
-KW_TOPIC = "scout-kw-c639f2f6f2bd1f4401"   # the hourly Claude routine publishes AI-picked phrases here
+KW_TOPIC = "scout-kw-c639f2f6f2bd1f4401"
+MEM_TOPIC = "scout-mem-c639f2f6f2bd1f4401"   # shared memory of pinged coins (the cloud routine re-publishes it)   # the hourly Claude routine publishes AI-picked phrases here
 TRUMP_FEED = "https://trumpstruth.org/feed"  # public RSS mirror of Trump's Truth Social posts
 
 STOP = set("""the a an and or of to in on for with at by from is are was were be been it this that
