@@ -1914,7 +1914,8 @@ async def x_vip_loop(state):
                                                    f'"{ph}" to this coin. PING only if the post is clearly about the '
                                                    f'thing/animal/character/meme the coin is named after.',
                                                    "not checked yet (VIP heads-up)", {"story": ph})
-                    if v is None or v["verdict"] == "PING":
+                    # "BUDGET" = daily AI budget used up: treat like AI unavailable - a VIP heads-up still goes out
+                    if v is None or v == "BUDGET" or v["verdict"] == "PING":
                         judged.append((ph, m))
                     else:
                         log(f"VIP match skipped by AI: ${m['symbol']} ('{ph}') - {v['reason']}")
