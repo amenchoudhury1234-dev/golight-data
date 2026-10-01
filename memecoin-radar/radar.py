@@ -1531,7 +1531,7 @@ async def keywords_loop(state):
 # real money (fast rise, a crowd of buyers far outnumbering sellers, big volume) and passes the safety check.
 # These go to a SEPARATE ntfy channel (FAST_TOPIC), no AI (speed + budget), and are paper-traded as "FAST LOTTO" so the
 # scorecard shows whether they pay. Pure lottery: GBP10-20, sell half at 2x.
-FAST_CHECKS_S = (45, 90, 150, 240)
+FAST_CHECKS_S = tuple(range(20, 241, 15))   # every 15s for the first 4 min (was 4 checks: LEAFRA pinged at 4 min, $115K)
 FAST_MIN_MCAP, FAST_MAX_MCAP = 60_000, 600_000
 FAST_MIN_RISE = 1.4              # market cap vs our first look at it
 FAST_MIN_BUYS_M5 = 60
@@ -1539,6 +1539,12 @@ FAST_BUY_RATIO = 1.5
 FAST_MIN_VOL_M5 = 25_000
 FAST_MAX_PER_DAY = 12
 _FAST = {"day": "", "n": 0, "seen": set()}
+
+
+def _fast_bar(age_min):
+    """The buy/volume bar grows with the coin's age: 60 buys in its first minute is a lot more than at minute 4."""
+    f = min(1.0, max(age_min, 0.5) / 3)
+    return max(25, FAST_MIN_BUYS_M5 * f), max(10_000, FAST_MIN_VOL_M5 * f)
 
 
 def fast_lotto_check(mint, first_mcap):
@@ -1555,8 +1561,8 @@ def fast_lotto_check(mint, first_mcap):
     if (mint in _FAST["seen"] or _FAST["n"] >= FAST_MAX_PER_DAY
             or not FAST_MIN_MCAP <= m["mcap"] <= FAST_MAX_MCAP
             or (rise < FAST_MIN_RISE and m["chg_m5"] < 50)
-            or m["buys_m5"] < FAST_MIN_BUYS_M5 or m["buys_m5"] < FAST_BUY_RATIO * max(m["sells_m5"], 1)
-            or m["vol_m5"] < FAST_MIN_VOL_M5 or dumping_now(m)):
+            or m["buys_m5"] < _fast_bar(m["age_h"] * 60)[0] or m["buys_m5"] < FAST_BUY_RATIO * max(m["sells_m5"], 1)
+            or m["vol_m5"] < _fast_bar(m["age_h"] * 60)[1] or dumping_now(m)):
         return first_mcap
     ok, notes, verified = rugcheck(mint)
     _FAST["seen"].add(mint)
