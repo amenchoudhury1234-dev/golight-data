@@ -1707,6 +1707,8 @@ RC_TRACK = {}   # mint -> {"t", "kind", "done": set of snapshot offsets taken, "
 # fast channel marked UNPROVEN (user asked for it, colour-coded); results on the scorecard's "label" line.
 # Was 120s / +50%: "will save us" pinged 22:33:56, FALLING at 22:34:47 (-67%), red label only at 22:36:03 - useless.
 # At 45s: TRUMP +29% holders (gave a 2.6x window), SHARED +11% and "will save us" +10% (rugs).
+RUN_CHECK_S = 600
+RUN_MIN_X = 3.0
 TIER_AT_S = 45
 TIER_MIN_HOLDER_GROWTH = 1.2
 TIER_MAX_LINKED = 5
@@ -1728,6 +1730,10 @@ def _tier_read(mint, s):
     if mint not in EXITS:          # FALLING already went out: a label now would only be noise
         return
     EXITS[mint]["read"] = read
+    if tier == "REAL BUYERS":
+        # Record-only on the phone (1 Oct): green at 45s confused - TRUMP got it and "only" did 2.6x. The phone's green
+        # is STILL RUNNING at 10 min instead (see exit_check); the red QUICK FLIP warning stays.
+        return
     # User asked to see it on the fast channel, colour-coded (ntfy can't colour text; the tag emoji is the colour).
     m = {"name": s.get("name", sym), "symbol": sym, "addr": mint, "chain": "solana", "url": s.get("url", "")}
     runner = tier == "REAL BUYERS"
@@ -1861,6 +1867,20 @@ def exit_check():
         x, peak_x, mins = m["price"] / e["price"], e["peak"] / e["price"], (now - e["t"]) / 60
         stats = (f"5m: {m['buys_m5']}/{m['sells_m5']} buys/sells, vol {fmt_usd(m['vol_m5'])} | "
                  f"Liq {fmt_usd(m['liq'])}\n" + (e["read"] + "\n" if e.get("read") else "") + f"CA: {a}")
+        # STILL RUNNING (green): 1 Oct, ~10 min after the ping the big runners were already 3x+ and climbing (WIRED ~10x
+        # -> 38x, Alonmas ~4x -> 9x, 𝕏/ACC ~3.5x -> 7x) while TRUMP sat at 1-2x and the rugs were dead.
+        if not e.get("run10") and now - e["t"] >= RUN_CHECK_S:
+            e["run10"] = True
+            running = x >= RUN_MIN_X and m["buys_m5"] > m["sells_m5"] and m["chg_m5"] > 0 and not dumping_now(m)
+            _flag_ping(a, e["kind"], still_running=running, x_10m=round(x, 2))
+            if running:
+                send_ntfy(f"STILL RUNNING: ${m['symbol']} {fmt_usd(m['mcap'])} (x{x:.1f}, 10 min after the ping)",
+                          f"{m['name']} is x{x:.1f} {mins:.0f} min after its {e['kind']} ping and still climbing on "
+                          f"real buying. Tonight's coins like this kept going (WIRED 38x, Alonmas 9x, 𝕏/ACC 7x), but "
+                          f"all of them crashed in the end - FALLING will ping at -50% from the peak.\n"
+                          f"UNPROVEN: 3 examples so far, being tested until ~8 Oct.\n{stats}",
+                          click=coinbase_url(m), priority="high", tags="green_circle", actions=check_links(m),
+                          topic=FAST_TOPIC)
         if not e["sent2x"] and x >= 2:
             e["sent2x"] = True
             send_ntfy(f"2x: ${m['symbol']} {fmt_usd(m['mcap'])} (x{x:.1f} since the ping)",
@@ -1907,7 +1927,8 @@ def exit_restore():
         if (now - p["t"] < EXIT_WATCH_MINUTES * 60
                 and (p.get("last_x") or 1) > (1 - EXIT_DROP_AFTER_2X) * (p.get("peak_x") or 1)):  # not already crashed
             EXITS[p["addr"]] = {"t": p["t"], "price": p["price"], "peak": p["price"] * (p.get("peak_x") or 1),
-                                "kind": p["kind"], "sent2x": (p.get("peak_x") or 1) >= 2, "rc2": True}
+                                "kind": p["kind"], "sent2x": (p.get("peak_x") or 1) >= 2, "rc2": True,
+                                "run10": now - p["t"] > RUN_CHECK_S + 60}   # don't run the 10-min check late
     if EXITS:
         names = {p["addr"]: p["symbol"] for p in pings if p.get("addr") in EXITS}
         log(f"follow-ups restored after restart: {', '.join(names.values())}")
@@ -2800,6 +2821,9 @@ def scorecard_text(hours=24):
             grp = [p for p in fl if p["f"].get("tier") == tier]
             if grp:
                 tests.append(grp_line(f"label {tier}", grp))
+        grp = [p for p in fl if p["f"].get("still_running")]
+        if grp:
+            tests.append(grp_line("STILL RUNNING at 10 min", grp))
     if tests:
         L.append("TESTS (paper only, no pings): " + "; ".join(tests))
     best = sorted(pings, key=lambda p: -(p.get("peak_x") or 0))[:3]
