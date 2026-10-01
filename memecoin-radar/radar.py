@@ -1536,7 +1536,10 @@ async def keywords_loop(state):
 # These go to a SEPARATE ntfy channel (FAST_TOPIC), no AI (speed + budget), and are paper-traded as "FAST LOTTO" so the
 # scorecard shows whether they pay. Pure lottery: GBP10-20, sell half at 2x.
 FAST_CHECKS_S = tuple(range(20, 241, 15))   # every 15s for the first 4 min (was 4 checks: LEAFRA pinged at 4 min, $115K)
-FAST_MIN_MCAP, FAST_MAX_MCAP = 60_000, 600_000
+# Max was $600K. 1 Oct: the takers moved off pump.fun at $30-45K and pinged at $62-115K (𝕏/ACC $62K, Alonmas $74K);
+# $SpaceX pinged at $454K because its pool OPENED at ~$430K (supply pre-bought in seconds, "copycat token", high
+# holder correlation). User: "early, hopefully under $100K". Anything above $150K here is late or abnormal.
+FAST_MIN_MCAP, FAST_MAX_MCAP = 60_000, 150_000
 FAST_MIN_RISE = 1.4              # market cap vs our first look at it
 FAST_MIN_BUYS_M5 = 60
 FAST_BUY_RATIO = 1.5
@@ -1826,12 +1829,12 @@ FAST_EARLY_BAR = 0.8
 _FAST_EARLY_SEEN = set()
 
 
-def fast_early_paper(mint, m, rise):
+def fast_early_paper(mint, m, rise, chg_ok=False):
     if mint in _FAST_EARLY_SEEN:
         return
     buys_bar, vol_bar = _fast_bar(m["age_h"] * 60)
     if (FAST_EARLY_MIN_MCAP <= m["mcap"] <= FAST_MAX_MCAP
-            and (rise >= FAST_EARLY_MIN_RISE or m["chg_m5"] >= 50)
+            and (rise >= FAST_EARLY_MIN_RISE or chg_ok)
             and m["buys_m5"] >= buys_bar * FAST_EARLY_BAR and m["buys_m5"] >= FAST_BUY_RATIO * max(m["sells_m5"], 1)
             and m["vol_m5"] >= vol_bar * FAST_EARLY_BAR and not dumping_now(m)):
         _FAST_EARLY_SEEN.add(mint)
@@ -1851,13 +1854,17 @@ def fast_lotto_check(mint, first_mcap):
     if not p:
         return first_mcap
     m = metrics(p)
+    first_look = not first_mcap
     first_mcap = first_mcap or m["mcap"]
     rise = m["mcap"] / first_mcap if first_mcap else 1
+    # DexScreener's "+X% in 5 min" counts the pool's opening jump, so it only stands in for a rise on our FIRST look
+    # (no baseline yet). 1 Oct: $SpaceX passed at x1.1 since our first look because its 5-min change read +866%.
+    chg_ok = first_look and m["chg_m5"] >= 50
     day = time.strftime("%Y-%m-%d")
     if _FAST["day"] != day:
         _FAST.update(day=day, n=0, seen=set())
     # own thread: its RugCheck (~1s) must never delay a real FAST LOTTO ping
-    threading.Thread(target=fast_early_paper, args=(mint, m, rise), daemon=True).start()
+    threading.Thread(target=fast_early_paper, args=(mint, m, rise, chg_ok), daemon=True).start()
     th = theme_match(m["name"], m["symbol"])
     buys_bar, vol_bar = _fast_bar(m["age_h"] * 60)
     min_mcap, min_rise = FAST_MIN_MCAP, FAST_MIN_RISE
@@ -1866,7 +1873,7 @@ def fast_lotto_check(mint, first_mcap):
         min_mcap, min_rise = FAST_STORY_MIN_MCAP, FAST_STORY_MIN_RISE
     if (mint in _FAST["seen"] or _FAST["n"] >= FAST_MAX_PER_DAY
             or not min_mcap <= m["mcap"] <= FAST_MAX_MCAP
-            or (rise < min_rise and m["chg_m5"] < 50)
+            or (rise < min_rise and not chg_ok)
             or m["buys_m5"] < buys_bar or m["buys_m5"] < FAST_BUY_RATIO * max(m["sells_m5"], 1)
             or m["vol_m5"] < vol_bar or dumping_now(m)):
         return first_mcap
@@ -1892,6 +1899,7 @@ def fast_lotto_check(mint, first_mcap):
         avg_trade = m["vol_m5"] / max(m["buys_m5"] + m["sells_m5"], 1)
         log_ping("FAST LOTTO", m, {"rise": round(rise, 2), "verified": verified,
                                    "avg_trade": round(avg_trade), "insider_net": "insider network" in notes,
+                                   "first_look": first_look, "first_mcap": round(first_mcap),
                                    **({"story": th[0], "launch_src": th[1]} if th else {})})
         exit_add(mint, m, "FAST LOTTO")
     return first_mcap
