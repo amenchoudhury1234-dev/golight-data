@@ -1582,6 +1582,7 @@ FAST_STORY_MIN_RISE = FAST_MIN_RISE
 FAST_STORY_BAR = 1.0             # x the normal buys/volume bar
 EXIT_WATCH_MINUTES = 60
 EXIT_DROP_FROM_PEAK = 0.30
+EXIT_DROP_AFTER_2X = 0.50
 THEMES = {}                      # theme -> (last seen, source)
 RECENT_CREATES = deque()         # (time, mint, name, symbol) of pump.fun launches in the last hour
 EARLY = {}                       # mint -> (added, theme, source)
@@ -1785,10 +1786,13 @@ def exit_check():
             e["sent2x"] = True
             send_ntfy(f"2x: ${m['symbol']} {fmt_usd(m['mcap'])} (x{x:.1f} since the ping)",
                       f"{m['name']} is at x{x:.1f} {mins:.0f} min after its {e['kind']} ping. In the lottery plan this "
-                      f"is the sell-half point. You'll get one more ping if it falls 30% from its peak.\n{stats}",
+                      f"is the sell-half point. You'll get one more ping if it falls 50% from its peak.\n{stats}",
                       click=coinbase_url(m), priority="high", tags="moneybag", actions=check_links(m),
                       topic=FAST_TOPIC)
-        elif m["price"] <= (1 - EXIT_DROP_FROM_PEAK) * e["peak"] or m["liq"] < 1000:
+        # After a 2x, swings are bigger: 1 Oct Alonmas got FALLING at x3.58 (-38% from peak), then went to x6.1.
+        # Runners that have doubled get -50% from the peak; a real rug (𝕏/ACC -99%) still trips it at once.
+        elif (m["price"] <= (1 - (EXIT_DROP_AFTER_2X if e["sent2x"] else EXIT_DROP_FROM_PEAK)) * e["peak"]
+              or m["liq"] < 1000):
             EXITS.pop(a, None)
             drop = 1 - m["price"] / e["peak"]
             peak_txt = (f"never rose after its {e['kind']} ping" if peak_x < 1.02 else
