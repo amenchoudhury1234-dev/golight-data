@@ -796,6 +796,7 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     if phrase and not strong_story:
         # e.g. a coin matching a phrase that's only on Reddit: wait until a 2nd source (Google, news, a VIP) agrees
         log_candidate(kind, m, False, [f"single source ({', '.join(srcs) or '?'})"], flags)
+        second_look_add(m, kind, phrase, flags)
         return
     prev = state.alerted.get(m["addr"])
     if not skip_dedupe and not state.should_alert(m["addr"], m["mcap"]):
@@ -1686,7 +1687,73 @@ def early_check():
 
 def exit_add(mint, m, kind):
     if m.get("price"):
-        EXITS[mint] = {"t": time.time(), "price": m["price"], "peak": m["price"], "kind": kind, "sent2x": False}
+        EXITS[mint] = {"t": time.time(), "price": m["price"], "peak": m["price"], "kind": kind, "sent2x": False,
+                       "rc2": False}
+
+
+def _flag_ping(addr, kind, **fl):
+    """Add record-only test results to the newest pings_log entry for this coin + kind."""
+    with PINGS_LOCK:
+        pings = _load_pings()
+        for p in reversed(pings):
+            if p.get("addr") == addr and p.get("kind") == kind:
+                p.setdefault("f", {}).update(fl)
+                _save_pings(pings)
+                return
+
+
+# ----------------------------- RECORD-ONLY TESTS (1 Oct, user: "if anything compromises accuracy, we don't") ----
+# Nothing below changes what reaches the phone. Each idea is paper-tracked; the scorecard's "TESTS" line shows whether
+# it would have caught big winners without adding junk (or would have skipped losers without killing winners).
+# 1) SECOND LOOK: $DOMAIN ("SI Strategy") was seen at $41K at 17:48 with one weak clue (a "domain" launch cluster)
+#    and correctly held back - 107 such coins: only 13% hit 2x, lottery avg 0.36x - but it ran 35x ($backpack 53x).
+#    Each held-back coin is looked at again after 10 and 20 min; if it's STILL climbing on real buying, that
+#    strength is the missing second clue -> logged as "SECOND LOOK" (paper only).
+# 2) FAST LOTTO filters, on every FAST LOTTO ping: average trade size (YAP: $22/trade, rugged; 𝕏/ACC: $76, ran 6x),
+#    RugCheck's insider-network flag at the ping, and a second RugCheck 45s later (its wallet analysis fills in late;
+#    but the AI skipped $DOMAIN partly for an insider network and it still ran 35x - so these stay record-only).
+SECOND_LOOK_MIN = (10, 20)
+SECOND_LOOK_MIN_RISE = 1.3       # price vs when it was held back
+SECOND_LOOK_MIN_LIQ = 10_000
+FAST_TEST_MIN_AVG_TRADE = 40     # $ per trade in the last 5 min
+SECOND_LOOK = {}                 # addr -> {"t", "chain", "kind", "price", "mcap", "phrase", "flags", "done"}
+
+
+def second_look_add(m, kind, phrase, flags):
+    if m.get("price") and m["addr"] not in SECOND_LOOK and len(SECOND_LOOK) < 300:
+        SECOND_LOOK[m["addr"]] = {"t": time.time(), "chain": m["chain"], "kind": kind, "price": m["price"],
+                                  "mcap": m["mcap"], "phrase": phrase, "flags": dict(flags or {}), "done": 0}
+
+
+def second_look_check():
+    now = time.time()
+    due = {}
+    for a, s in list(SECOND_LOOK.items()):
+        if s["done"] >= len(SECOND_LOOK_MIN):
+            SECOND_LOOK.pop(a, None)
+        elif now - s["t"] >= SECOND_LOOK_MIN[s["done"]] * 60:
+            due.setdefault(s["chain"], []).append(a)
+    for chain, addrs in due.items():
+        pairs = dex_pairs_for_tokens(chain, addrs)
+        for a in addrs:
+            s = SECOND_LOOK.get(a)
+            if not s:
+                continue
+            s["done"] += 1
+            p = pairs.get(a)
+            if not p:
+                continue
+            m = metrics(p)
+            if (m["price"] >= SECOND_LOOK_MIN_RISE * s["price"] and m["buys_h1"] > m["sells_h1"]
+                    and m["buys_m5"] >= m["sells_m5"] and m["chg_m5"] > -10 and not dumping_now(m)
+                    and m["liq"] >= SECOND_LOOK_MIN_LIQ):
+                SECOND_LOOK.pop(a, None)
+                log(f'second look (paper only, no ping): ${m["symbol"]} {fmt_usd(s["mcap"])} -> {fmt_usd(m["mcap"])} '
+                    f'after {(now - s["t"]) / 60:.0f} min, still climbing ("{s["phrase"]}")')
+                SHADOW_SEEN.pop(a, None)      # a separate paper entry from the held-back one
+                log_candidate("SECOND LOOK", m, False, ["paper only"],
+                              dict(s["flags"], story=s["phrase"], held_kind=s["kind"],
+                                   held_mcap=round(s["mcap"]), wait_min=round((now - s["t"]) / 60)))
 
 
 def exit_check():
@@ -1696,6 +1763,12 @@ def exit_check():
         EXITS.pop(a, None)
     if not EXITS:
         return
+    for a, e in list(EXITS.items()):      # record-only test: a fresh RugCheck 45s after the ping
+        if not e["rc2"] and now - e["t"] >= 45:
+            e["rc2"] = True
+            _rc_cache.pop(a, None)
+            ok2, notes2, _ = rugcheck(a)
+            _flag_ping(a, e["kind"], rc2_ok=ok2, rc2_insider_net="insider network" in notes2)
     for a, p in dex_pairs_for_tokens("solana", list(EXITS)).items():
         e = EXITS.get(a)
         m = metrics(p)
@@ -1725,7 +1798,7 @@ def exit_check():
 async def early_story_loop(state):
     loop = asyncio.get_running_loop()
     while True:
-        for fn in (early_check, exit_check):
+        for fn in (early_check, exit_check, second_look_check):
             try:
                 await loop.run_in_executor(None, fn)
             except Exception as e:
@@ -1775,7 +1848,9 @@ def fast_lotto_check(mint, first_mcap):
                  f"(x{rise:.1f} since migration)", body,
                  click=coinbase_url(m),
                  priority="high", tags="zap", actions=check_links(m), topic=FAST_TOPIC):
+        avg_trade = m["vol_m5"] / max(m["buys_m5"] + m["sells_m5"], 1)
         log_ping("FAST LOTTO", m, {"rise": round(rise, 2), "verified": verified,
+                                   "avg_trade": round(avg_trade), "insider_net": "insider network" in notes,
                                    **({"story": th[0], "launch_src": th[1]} if th else {})})
         exit_add(mint, m, "FAST LOTTO")
     return first_mcap
@@ -2508,6 +2583,21 @@ def scorecard_text(hours=24):
                          f"{_gbp(sum(_pnl(p, 'lotto') or 0 for p in grp))}")
         u = _ai_usage()
         L.append(f"AI cost today: {u['calls']} checks ({u.get('deep', 0)} web cross-checks), ${u['usd']:.2f}")
+    def grp_line(label, grp):
+        return (f"{label} {len(grp)} (2x: {sum((p.get('peak_x') or 0) >= 2 for p in grp)}, "
+                f"5x: {sum((p.get('peak_x') or 0) >= 5 for p in grp)}, lotto {_gbp(sum(_pnl(p, 'lotto') or 0 for p in grp))})")
+    tests = []
+    for kind in ("SECOND LOOK", "EARLY STORY"):
+        grp = [p for p in shadow if p["kind"] == kind and "paper only" in (p.get("reasons") or [])]
+        if grp:
+            tests.append(grp_line(kind, grp))
+    fl = [p for p in pings if p["kind"] == "FAST LOTTO" and "avg_trade" in (p.get("f") or {})]
+    if fl:
+        cut = [p for p in fl if p["f"]["avg_trade"] < FAST_TEST_MIN_AVG_TRADE]
+        tests.append(grp_line(f"FAST LOTTO avg trade <${FAST_TEST_MIN_AVG_TRADE} would skip", cut))
+        tests.append(grp_line("2nd RugCheck would skip", [p for p in fl if p["f"].get("rc2_ok") is False]))
+    if tests:
+        L.append("TESTS (paper only, no pings): " + "; ".join(tests))
     best = sorted(pings, key=lambda p: -(p.get("peak_x") or 0))[:3]
     if best:
         L.append("Best: " + "; ".join(f"{p['kind']} ${p['symbol']} peak {p.get('peak_x', 1):.1f}x "
