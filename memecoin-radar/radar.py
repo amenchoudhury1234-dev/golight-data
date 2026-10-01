@@ -509,11 +509,11 @@ def story_coin_symbols():
 AI_KEY_FILE = "anthropic_key.txt"
 AI_MODEL = "claude-opus-5-5"
 AI_EFFORT = "medium"
-AI_MAX_CALLS_PER_DAY = 80          # hard guard on spend (~2-3p per call)
+AI_MAX_CALLS_PER_DAY = 120        # hard guard on spend (~1-3p per call)
 AI_USAGE_FILE = "ai_usage.json"
 AI_DEEP_MAX_PER_DAY = 8            # live web cross-checks (~10-20p each: up to 3 searches + reading results)
 AI_DEEP_SEARCHES = 3
-AI_DAILY_BUDGET_USD = 0.50         # hard daily $ cap for all AI checks (max ~$15/month = your account limit)
+AI_DAILY_BUDGET_USD = 1.00         # hard daily $ cap for all AI checks (max ~$30/month); 1 Oct: $0.50 ran out by 08:00
 AI_DEEP_RESERVE_USD = 0.20         # a web cross-check only starts if this much of today's budget is left
 AI_PRICE_SEARCH = 0.01             # $ per web search
 AI_PRICE_IN, AI_PRICE_OUT = 4.00, 20.00   # $ per million tokens (Opus 5.5)
