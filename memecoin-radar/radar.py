@@ -27,6 +27,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from datetime import datetime
 
 # ----------------------------- SETTINGS (edit freely) -----------------------------
@@ -1414,6 +1415,8 @@ def launch_cluster_note(name, symbol, creator):
     for w in words:
         _LAUNCH_WORDS.setdefault(w, {})[creator] = now
         recent, base, cluster = launch_spike(w, now)
+        if cluster:
+            theme_add(w, "launch cluster")
         if cluster and AUTO is not None:
             AUTO.add(w, "launch-cluster", now)
             AUTO.seen[w] = max(AUTO.seen.get(w, 0), now)   # newest phrases are searched first
@@ -1547,6 +1550,180 @@ def _fast_bar(age_min):
     return max(25, FAST_MIN_BUYS_M5 * f), max(10_000, FAST_MIN_VOL_M5 * f)
 
 
+# ----------------------------- HOT THEMES + EARLY STORY (1 Oct: 𝕏/ACC) -----------------------------
+# "𝕏 Accelerationism" ($𝕏/ACC) ran $32K -> $246K in ~15 min after Elon's "super intelligence" post. The radar logged
+# an "accelerationism" launch cluster at 19:03, 7 min before its FAST LOTTO ping at $62K, but nothing linked the two.
+# A HOT THEME = a launch-cluster word or a phrase from a VIP post in the last hour. A coin named after one is:
+#  - watched every 15s while still on pump.fun and pinged as EARLY STORY (fast channel) when it leads its theme on
+#    buying, after the same RugCheck (RugCheck leaves pump.fun's own curve account out of the holder count);
+#  - let through a lower FAST LOTTO bar after migration, tagged "+ STORY". Coins with no theme: rule unchanged.
+# Every FAST LOTTO / EARLY STORY ping then gets follow-ups for an hour: one at 2x (the sell-half point) and one if it
+# falls 30% from its peak (LEAFRA did 1.54x, then -92% within minutes).
+THEME_MINUTES = 60
+EARLY_POLL_S = 15
+EARLY_WATCH_MINUTES = 25
+EARLY_MAX_WATCH = 40
+EARLY_MIN_MCAP, EARLY_MAX_MCAP = 12_000, 120_000
+EARLY_MIN_BUYS_M5 = 40
+EARLY_MIN_VOL_M5 = 5_000
+EARLY_MIN_M5_CHANGE = 15
+EARLY_MAX_PER_DAY = 8
+FAST_STORY_MIN_MCAP = 40_000     # a theme coin may ping from $40K (𝕏/ACC moved off pump.fun at $32K)
+FAST_STORY_MIN_RISE = 1.2
+FAST_STORY_BAR = 0.7             # x the normal buys/volume bar
+EXIT_WATCH_MINUTES = 60
+EXIT_DROP_FROM_PEAK = 0.30
+THEMES = {}                      # theme -> (last seen, source)
+RECENT_CREATES = deque()         # (time, mint, name, symbol) of pump.fun launches in the last hour
+EARLY = {}                       # mint -> (added, theme, source)
+_EARLY = {"day": "", "n": 0, "seen": set()}
+EXITS = {}                       # mint -> follow-up state after a fast-channel ping
+
+
+def _flat(s):
+    import re
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _theme_hits(theme, name, symbol):
+    f = _flat(theme)
+    return len(f) >= 5 and (f in _flat(name) or f == _flat(symbol))
+
+
+def theme_match(name, symbol):
+    """(theme, source) of the newest live hot theme this coin is named after, or None."""
+    now = time.time()
+    for th, (t, src) in sorted(THEMES.items(), key=lambda kv: -kv[1][0]):
+        if now - t <= THEME_MINUTES * 60 and _theme_hits(th, name, symbol):
+            return th, src
+    return None
+
+
+def theme_add(theme, src):
+    now = time.time()
+    fresh = theme not in THEMES or now - THEMES[theme][0] > THEME_MINUTES * 60
+    THEMES[theme] = (now, src)
+    for th in [k for k, (t, _) in THEMES.items() if now - t > THEME_MINUTES * 60]:
+        THEMES.pop(th, None)
+    if fresh:   # coins launched BEFORE the theme showed up - 𝕏/ACC was one of the launches that made the cluster
+        for t, mint, name, symbol in list(RECENT_CREATES):
+            if now - t <= THEME_MINUTES * 60 and _theme_hits(theme, name, symbol):
+                early_add(mint, theme, src, symbol)
+
+
+def early_add(mint, theme, src, symbol):
+    if mint in EARLY or mint in _EARLY["seen"] or mint in _FAST["seen"]:
+        return
+    if len(EARLY) >= EARLY_MAX_WATCH:       # full: the oldest watch makes room
+        EARLY.pop(min(EARLY, key=lambda a: EARLY[a][0]), None)
+    EARLY[mint] = (time.time(), theme, src)
+    log(f'early story: ${symbol} matches hot theme "{theme}" ({src}) - watching every {EARLY_POLL_S}s')
+
+
+def note_create(mint, name, symbol):
+    """Every new pump.fun launch: remember it for an hour, and watch it now if it matches a live theme."""
+    now = time.time()
+    RECENT_CREATES.append((now, mint, name or "", symbol or ""))
+    while RECENT_CREATES and now - RECENT_CREATES[0][0] > THEME_MINUTES * 60:
+        RECENT_CREATES.popleft()
+    hit = theme_match(name, symbol)
+    if hit:
+        early_add(mint, hit[0], hit[1], symbol)
+
+
+def early_check():
+    """One batched DexScreener look at every theme coin on the early watch; pings the leader of a theme if it's
+    taking off on real buying and passes RugCheck."""
+    now = time.time()
+    for a in [a for a, v in EARLY.items() if now - v[0] > EARLY_WATCH_MINUTES * 60]:
+        EARLY.pop(a, None)
+    if not EARLY:
+        return
+    day = time.strftime("%Y-%m-%d")
+    if _EARLY["day"] != day:
+        _EARLY.update(day=day, n=0, seen=set())
+    ms = {a: metrics(p) for a, p in dex_pairs_for_tokens("solana", list(EARLY)).items() if a in EARLY}
+    for a, m in sorted(ms.items(), key=lambda kv: -kv[1]["vol_m5"]):
+        if a not in EARLY:
+            continue
+        _, theme, src = EARLY[a]
+        leader = max((b for b in ms if b in EARLY and EARLY[b][1] == theme), key=lambda b: ms[b]["vol_m5"])
+        if (leader != a or _EARLY["n"] >= EARLY_MAX_PER_DAY or a in _FAST["seen"]
+                or not EARLY_MIN_MCAP <= m["mcap"] <= EARLY_MAX_MCAP
+                or m["buys_m5"] < EARLY_MIN_BUYS_M5 or m["buys_m5"] < FAST_BUY_RATIO * max(m["sells_m5"], 1)
+                or m["vol_m5"] < EARLY_MIN_VOL_M5 or m["chg_m5"] < EARLY_MIN_M5_CHANGE or dumping_now(m)):
+            continue
+        ok, notes, verified = rugcheck(a)
+        EARLY.pop(a, None)
+        _EARLY["seen"].add(a)
+        if not ok:
+            log(f"early story: ${m['symbol']} taking off but failed safety: {notes.split('REJECT: ')[-1][:80]}")
+            log_candidate("EARLY STORY", m, False, ["safety"], {"story": theme})
+            continue
+        _EARLY["n"] += 1
+        _FAST["seen"].add(a)                 # no second ping as FAST LOTTO when it migrates
+        where = "still on pump.fun (before migration)" if on_bonding_curve(m) else "just moved off pump.fun"
+        body = (f"{m['name']} (${m['symbol']}) is named after the hot theme \"{theme}\" ({src}) and is taking off, "
+                f"{where}: {fmt_usd(m['mcap'])}, {max(1, round(m['age_h'] * 60))} min old, +{m['chg_m5']:.0f}% in 5m.\n"
+                f"5m: {m['buys_m5']}/{m['sells_m5']} buys/sells, vol {fmt_usd(m['vol_m5'])} | Liq {fmt_usd(m['liq'])}\n"
+                f"CA: {a}\n{notes}\n"
+                f"Leading the coins named after this theme. EARLIER than FAST LOTTO, so MORE of these die. "
+                f"No AI check. LOTTERY ONLY: GBP10-20 max, sell half at 2x - you'll get a 2x / falling follow-up.")
+        if send_ntfy(f"EARLY STORY: ${m['symbol']} {fmt_usd(m['mcap'])} - \"{theme}\"", body, click=coinbase_url(m),
+                     priority="high", tags="zap,newspaper", actions=check_links(m), topic=FAST_TOPIC):
+            log_ping("EARLY STORY", m, {"story": theme, "launch_src": src, "verified": verified})
+            exit_add(a, m, "EARLY STORY")
+
+
+def exit_add(mint, m, kind):
+    if m.get("price"):
+        EXITS[mint] = {"t": time.time(), "price": m["price"], "peak": m["price"], "kind": kind, "sent2x": False}
+
+
+def exit_check():
+    """Follow-ups for fast-channel pings: one at 2x, one when it falls 30% from its peak (then the watch ends)."""
+    now = time.time()
+    for a in [a for a, e in EXITS.items() if now - e["t"] > EXIT_WATCH_MINUTES * 60]:
+        EXITS.pop(a, None)
+    if not EXITS:
+        return
+    for a, p in dex_pairs_for_tokens("solana", list(EXITS)).items():
+        e = EXITS.get(a)
+        m = metrics(p)
+        if not e or not m["price"]:
+            continue
+        e["peak"] = max(e["peak"], m["price"])
+        x, peak_x, mins = m["price"] / e["price"], e["peak"] / e["price"], (now - e["t"]) / 60
+        stats = (f"5m: {m['buys_m5']}/{m['sells_m5']} buys/sells, vol {fmt_usd(m['vol_m5'])} | "
+                 f"Liq {fmt_usd(m['liq'])}\nCA: {a}")
+        if not e["sent2x"] and x >= 2:
+            e["sent2x"] = True
+            send_ntfy(f"2x: ${m['symbol']} {fmt_usd(m['mcap'])} (x{x:.1f} since the ping)",
+                      f"{m['name']} is at x{x:.1f} {mins:.0f} min after its {e['kind']} ping. In the lottery plan this "
+                      f"is the sell-half point. You'll get one more ping if it falls 30% from its peak.\n{stats}",
+                      click=coinbase_url(m), priority="high", tags="moneybag", actions=check_links(m),
+                      topic=FAST_TOPIC)
+        elif m["price"] <= (1 - EXIT_DROP_FROM_PEAK) * e["peak"] or m["liq"] < 1000:
+            EXITS.pop(a, None)
+            drop = 1 - m["price"] / e["peak"]
+            send_ntfy(f"FALLING: ${m['symbol']} down {drop:.0%} from its peak (x{x:.2f} vs the ping)",
+                      f"{m['name']} peaked at x{peak_x:.2f} and is now x{x:.2f} vs its {e['kind']} ping "
+                      f"{mins:.0f} min ago. Most of these keep falling. Last follow-up for this coin.\n{stats}",
+                      click=coinbase_url(m), priority="high", tags="warning", actions=check_links(m),
+                      topic=FAST_TOPIC)
+
+
+async def early_story_loop(state):
+    loop = asyncio.get_running_loop()
+    while True:
+        for fn in (early_check, exit_check):
+            try:
+                await loop.run_in_executor(None, fn)
+            except Exception as e:
+                log(f"{fn.__name__} error: {e}")
+        await asyncio.sleep(EARLY_POLL_S)
+
+
 def fast_lotto_check(mint, first_mcap):
     """One look at a freshly migrated coin. Returns (metrics, first_mcap) and pings if it's taking off."""
     p = dex_pairs_for_tokens("solana", [mint]).get(mint)
@@ -1558,11 +1735,17 @@ def fast_lotto_check(mint, first_mcap):
     day = time.strftime("%Y-%m-%d")
     if _FAST["day"] != day:
         _FAST.update(day=day, n=0, seen=set())
+    th = theme_match(m["name"], m["symbol"])
+    buys_bar, vol_bar = _fast_bar(m["age_h"] * 60)
+    min_mcap, min_rise = FAST_MIN_MCAP, FAST_MIN_RISE
+    if th:      # named after a hot theme (𝕏/ACC): a lower bar, so it pings sooner
+        buys_bar, vol_bar = buys_bar * FAST_STORY_BAR, vol_bar * FAST_STORY_BAR
+        min_mcap, min_rise = FAST_STORY_MIN_MCAP, FAST_STORY_MIN_RISE
     if (mint in _FAST["seen"] or _FAST["n"] >= FAST_MAX_PER_DAY
-            or not FAST_MIN_MCAP <= m["mcap"] <= FAST_MAX_MCAP
-            or (rise < FAST_MIN_RISE and m["chg_m5"] < 50)
-            or m["buys_m5"] < _fast_bar(m["age_h"] * 60)[0] or m["buys_m5"] < FAST_BUY_RATIO * max(m["sells_m5"], 1)
-            or m["vol_m5"] < _fast_bar(m["age_h"] * 60)[1] or dumping_now(m)):
+            or not min_mcap <= m["mcap"] <= FAST_MAX_MCAP
+            or (rise < min_rise and m["chg_m5"] < 50)
+            or m["buys_m5"] < buys_bar or m["buys_m5"] < FAST_BUY_RATIO * max(m["sells_m5"], 1)
+            or m["vol_m5"] < vol_bar or dumping_now(m)):
         return first_mcap
     ok, notes, verified = rugcheck(mint)
     _FAST["seen"].add(mint)
@@ -1575,12 +1758,17 @@ def fast_lotto_check(mint, first_mcap):
             f"{fmt_usd(m['mcap'])} in ~{max(1, round(m['age_h'] * 60))} min.\n"
             f"5m: {m['buys_m5']}/{m['sells_m5']} buys/sells, vol {fmt_usd(m['vol_m5'])} | Liq {fmt_usd(m['liq'])}\n"
             f"CA: {mint}\n{notes}\n"
-            f"NO STORY, NO AI CHECK - pure momentum. Most of these still die within the hour. "
-            f"LOTTERY ONLY: GBP10-20 max, sell half at 2x, expect to lose it.")
-    if send_ntfy(f"FAST LOTTO: ${m['symbol']} {fmt_usd(m['mcap'])} (x{rise:.1f} since migration)", body,
+            + (f"STORY: named after the hot theme \"{th[0]}\" ({th[1]}). No AI check. " if th else
+               "NO STORY, NO AI CHECK - pure momentum. ")
+            + "Most of these still die within the hour. "
+              "LOTTERY ONLY: GBP10-20 max, sell half at 2x, expect to lose it. 2x / falling follow-ups will come.")
+    if send_ntfy(f"FAST LOTTO{' + STORY' if th else ''}: ${m['symbol']} {fmt_usd(m['mcap'])} "
+                 f"(x{rise:.1f} since migration)", body,
                  click=coinbase_url(m),
                  priority="high", tags="zap", actions=check_links(m), topic=FAST_TOPIC):
-        log_ping("FAST LOTTO", m, {"rise": round(rise, 2), "verified": verified})
+        log_ping("FAST LOTTO", m, {"rise": round(rise, 2), "verified": verified,
+                                   **({"story": th[0], "launch_src": th[1]} if th else {})})
+        exit_add(mint, m, "FAST LOTTO")
     return first_mcap
 
 
@@ -1643,6 +1831,7 @@ async def graduations_loop(state):
                     if msg.get("txType") == "create":     # brand-new pump.fun launch
                         nursery_add(mint)
                         launch_cluster_note(msg.get("name"), msg.get("symbol"), msg.get("traderPublicKey") or mint)
+                        note_create(mint, msg.get("name"), msg.get("symbol"))
                         for a in [a for a, v in STORY_LAUNCHES.items() if time.time() - v[0] > 3600]:
                             STORY_LAUNCHES.pop(a, None)
                         hit = story_launch_match(msg.get("name"), msg.get("symbol"))
@@ -1991,6 +2180,8 @@ async def x_vip_loop(state):
                 norm = lambda w: w[:-1] if w.endswith("s") and len(w) > 4 else w    # "falcons" = "falcon"
                 search = [p for p in phrases if not {norm(w) for w in p.split()} <= routine
                           and not {norm(w) for w in p.split()} <= (routine | COMMON_WORDS)][:6]
+                for ph in search:            # hot themes: coins named after it get the early watch
+                    theme_add(ph, f"@{name} post")
                 # all phrase searches at once (was one per second): the phone buzzes ~5s sooner after a VIP post
                 results = await asyncio.gather(*(loop.run_in_executor(None, dex_search, ph) for ph in search))
                 for ph, pairs in zip(search, results):
@@ -2770,7 +2961,7 @@ async def main():
                          smart_wallets_loop(state), sleepers_loop(state), x_vip_loop(state),
                          scorecard_loop(state), second_leg_loop(state),
                          positions_loop(state), ignition_loop(state), nursery_loop(state), truth_ca_loop(state),
-                         listings_loop(state))
+                         listings_loop(state), early_story_loop(state))
 
 
 if __name__ == "__main__":
