@@ -2058,6 +2058,10 @@ def fast_lotto_check(mint, first_mcap):
             f"{fmt_usd(m['mcap'])} in ~{max(1, round(m['age_h'] * 60))} min.\n"
             f"5m: {m['buys_m5']}/{m['sells_m5']} buys/sells, vol {fmt_usd(m['vol_m5'])} | Liq {fmt_usd(m['liq'])}\n"
             f"CA: {mint}\n{notes}\n"
+            # 1 Oct: the only two fast pings whose address didn't end in "pump" were SHARED (rug) and FIX6900
+            # (Coinbase: "not supported", Blockaid: spam). Warn + record; filter only if the review shows a pattern.
+            + ("" if mint.endswith("pump") else
+               "WARNING: not a standard pump.fun address - Coinbase may not support it (FIX6900 wasn't).\n")
             + (f"STORY: named after the hot theme \"{th[0]}\" ({th[1]}). No AI check. " if th else
                "NO STORY, NO AI CHECK - pure momentum. ")
             + "Most of these still die within the hour. "
@@ -2070,6 +2074,7 @@ def fast_lotto_check(mint, first_mcap):
         log_ping("FAST LOTTO", m, {"rise": round(rise, 2), "verified": verified,
                                    "avg_trade": round(avg_trade), "insider_net": "insider network" in notes,
                                    "first_look": first_look, "first_mcap": round(first_mcap),
+                                   "pump_addr": mint.endswith("pump"),
                                    **({"story": th[0], "launch_src": th[1]} if th else {})})
         exit_add(mint, m, "FAST LOTTO")
     return first_mcap
