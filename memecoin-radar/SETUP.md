@@ -81,6 +81,11 @@ You can check it any time with `python radar.py --scorecard`. Run `python radar.
 ## Exit alerts for coins you hold (positions.txt)
 When you buy something, add a line to `positions.txt`: `<contract address> <average cost in $>` (copy "Average cost" from Coinbase). The radar checks every 30 seconds and sends an **urgent** ping to: sell half at 2x, sell a quarter at 3x, and sell the rest at 50% off the peak. There is no stop by default (set `POS_HARD_STOP = 0.70` in radar.py if you want one), plus a **DUMP WARNING** when sellers flood in. Delete the line when you've sold.
 
+## FAST LOTTO channel (optional, separate)
+Every coin that moves off pump.fun is checked at about 45 seconds, 90 seconds, 2.5 minutes and 4 minutes. If it's already taking off on real money (market cap up 1.4x+, 60+ buys in 5 minutes far outnumbering sells, $25K+ volume, passes the safety check), you get a **FAST LOTTO** ping on a **separate ntfy topic**:
+`scout-fast-c639f2f6f2bd1f4401`
+To get these, open the ntfy app, tap **+**, add that topic and turn on instant delivery. These have no story and no AI check: pure momentum, built for coins like $MEME (1 Oct: $48K to $855K in 50 minutes). **Most still die. GBP10-20 only.** They're paper-traded as "FAST LOTTO" so the scorecard shows whether they pay. Max 12 a day.
+
 ## Narrative mode (on by default)
 On 30 Sep, every price-only ping we could check fell 30% before reaching 2x, and most peaked within 3 minutes of the ping. So your phone now pings **only when there is a story**:
 - **CATALYST:** a coin matching a phrase from Trump, Elon, the news or trends

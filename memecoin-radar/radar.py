@@ -31,6 +31,8 @@ from datetime import datetime
 
 # ----------------------------- SETTINGS (edit freely) -----------------------------
 NTFY_TOPIC = "scout-alert-c639f2f6f2bd1f4401"   # the topic your phone's ntfy app is subscribed to
+FAST_TOPIC = "scout-fast-c639f2f6f2bd1f4401"    # SEPARATE channel for FAST LOTTO (migration take-off) pings - subscribe to
+                                                # it in the ntfy app if you want them; the main channel stays story-only
 CHAINS = {"solana", "base"}                     # chains you can buy in the Coinbase app
 
 # Early-runner rules (new coins)
@@ -416,10 +418,10 @@ def is_keyword_mover(m):
 
 
 # ----------------------------- alerting -----------------------------
-def send_ntfy(title, body, click=None, priority="high", tags="rotating_light", actions=None):
+def send_ntfy(title, body, click=None, priority="high", tags="rotating_light", actions=None, topic=None):
     """Publish via ntfy's JSON API so emoji / non-Latin coin names work (HTTP headers can't carry them)."""
     prio = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5}.get(priority, 4)
-    payload = {"topic": NTFY_TOPIC, "title": title[:120], "message": body[:3900], "priority": prio,
+    payload = {"topic": topic or NTFY_TOPIC, "title": title[:120], "message": body[:3900], "priority": prio,
                "tags": [t for t in tags.split(",") if t]}
     if click:
         payload["click"] = click
@@ -1522,6 +1524,73 @@ async def keywords_loop(state):
         await asyncio.sleep(KEYWORD_POLL_SECONDS)
 
 
+# ----------------------------- FAST LOTTO (catch a take-off at the migration "bottom") -----------------------------
+# 1 Oct: $MEME moved off pump.fun at 17:16 at $48K, was $344K by 17:21 and $855K at the peak - with no story, so the
+# story-only main channel stayed quiet. Hundreds of coins migrate a day and most die, so a ping at every migration is
+# useless. Instead each migration is checked at ~45s, 90s, 2.5 and 4 min, and pings ONLY if it is already taking off on
+# real money (fast rise, a crowd of buyers far outnumbering sellers, big volume) and passes the safety check.
+# These go to a SEPARATE ntfy channel (FAST_TOPIC), no AI (speed + budget), and are paper-traded as "FAST LOTTO" so the
+# scorecard shows whether they pay. Pure lottery: GBP10-20, sell half at 2x.
+FAST_CHECKS_S = (45, 90, 150, 240)
+FAST_MIN_MCAP, FAST_MAX_MCAP = 60_000, 600_000
+FAST_MIN_RISE = 1.4              # market cap vs our first look at it
+FAST_MIN_BUYS_M5 = 60
+FAST_BUY_RATIO = 1.5
+FAST_MIN_VOL_M5 = 25_000
+FAST_MAX_PER_DAY = 12
+_FAST = {"day": "", "n": 0, "seen": set()}
+
+
+def fast_lotto_check(mint, first_mcap):
+    """One look at a freshly migrated coin. Returns (metrics, first_mcap) and pings if it's taking off."""
+    p = dex_pairs_for_tokens("solana", [mint]).get(mint)
+    if not p:
+        return first_mcap
+    m = metrics(p)
+    first_mcap = first_mcap or m["mcap"]
+    rise = m["mcap"] / first_mcap if first_mcap else 1
+    day = time.strftime("%Y-%m-%d")
+    if _FAST["day"] != day:
+        _FAST.update(day=day, n=0, seen=set())
+    if (mint in _FAST["seen"] or _FAST["n"] >= FAST_MAX_PER_DAY
+            or not FAST_MIN_MCAP <= m["mcap"] <= FAST_MAX_MCAP
+            or (rise < FAST_MIN_RISE and m["chg_m5"] < 50)
+            or m["buys_m5"] < FAST_MIN_BUYS_M5 or m["buys_m5"] < FAST_BUY_RATIO * max(m["sells_m5"], 1)
+            or m["vol_m5"] < FAST_MIN_VOL_M5 or dumping_now(m)):
+        return first_mcap
+    ok, notes, verified = rugcheck(mint)
+    _FAST["seen"].add(mint)
+    if not ok:
+        log(f"fast lotto: ${m['symbol']} taking off but failed safety: {notes.split('REJECT: ')[-1][:80]}")
+        log_candidate("FAST LOTTO", m, False, ["safety"])
+        return first_mcap
+    _FAST["n"] += 1
+    body = (f"{m['name']} (${m['symbol']}) just moved off pump.fun and is TAKING OFF: {fmt_usd(first_mcap)} -> "
+            f"{fmt_usd(m['mcap'])} in ~{max(1, round(m['age_h'] * 60))} min.\n"
+            f"5m: {m['buys_m5']}/{m['sells_m5']} buys/sells, vol {fmt_usd(m['vol_m5'])} | Liq {fmt_usd(m['liq'])}\n"
+            f"CA: {mint}\n{notes}\n"
+            f"NO STORY, NO AI CHECK - pure momentum. Most of these still die within the hour. "
+            f"LOTTERY ONLY: GBP10-20 max, sell half at 2x, expect to lose it.")
+    if send_ntfy(f"FAST LOTTO: ${m['symbol']} {fmt_usd(m['mcap'])} (x{rise:.1f} since migration)", body,
+                 click=coinbase_url(m),
+                 priority="high", tags="zap", actions=check_links(m), topic=FAST_TOPIC):
+        log_ping("FAST LOTTO", m, {"rise": round(rise, 2), "verified": verified})
+    return first_mcap
+
+
+async def fast_lotto_watch(mint):
+    loop = asyncio.get_running_loop()
+    start, first = time.time(), None
+    for s_ in FAST_CHECKS_S:
+        await asyncio.sleep(max(0, start + s_ - time.time()))
+        try:
+            first = await loop.run_in_executor(None, fast_lotto_check, mint, first)
+        except Exception as e:
+            log(f"fast lotto error: {e}")
+        if mint in _FAST["seen"]:
+            return
+
+
 async def graduations_loop(state):
     try:
         import websockets  # noqa
@@ -1584,6 +1653,7 @@ async def graduations_loop(state):
                     else:                                  # migration off the bonding curve
                         hot_add(mint, "solana")
                         asyncio.create_task(recheck(mint))
+                        asyncio.create_task(fast_lotto_watch(mint))
         except Exception as e:
             log(f"PumpPortal connection lost ({e}); reconnecting in 15s")
             await asyncio.sleep(15)
