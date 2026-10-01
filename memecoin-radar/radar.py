@@ -837,9 +837,12 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
         verdict = None
         # 1 Oct: the $0.50 AI budget was used up by 07:57 and the copy above went out unchecked. Without the AI
         # only the strongest signals still ping (VIP contract addresses and listings never come through here).
-        if kind not in ("SLEEPER WAKING", "SMART MONEY", "NEWS MENTION"):
+        if kind not in ("SLEEPER WAKING", "SMART MONEY", "NEWS MENTION") and not (phrase and strong_story):
             log_candidate(kind, m, False, ["AI budget used - held back"], flags)
             return
+        if phrase and strong_story:
+            extra = (f"AI NOT CHECKED (today's AI budget is used up) - but the story \"{phrase}\" is cross-referenced "
+                     f"({', '.join(srcs)}). Check RugCheck/GMGN yourself before anything.\n" + extra)
     # A fresh Elon/Trump/VIP post IS the cross-check - skip the slow web search (up to ~60s) so the ping is fast.
     vip_fresh = "x-vip" in srcs or str((flags or {}).get("launch_src", "")).startswith("@")
     if (verdict and verdict["verdict"] == "PING" and not vip_fresh
@@ -1207,6 +1210,11 @@ NEWS_FEEDS = [
     "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",                                   # US top stories
     "https://news.google.com/rss/search?q=Trump+when:2h&hl=en-US&gl=US&ceid=US:en",            # anything Trump, last 2h
     "https://news.google.com/rss/search?q=viral+OR+typo+OR+gaffe+when:3h&hl=en-US&gl=US&ceid=US:en",
+    # 1 Oct: "I Am Jane Doe" (~30x, a viral women's-support movement around the Cornell case on CNN/BuzzFeed) wasn't a
+    # Trump/Elon/typo story - social movements and big US/entertainment stories need their own feeds.
+    "https://news.google.com/rss/headlines/section/topic/NATION?hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/headlines/section/topic/ENTERTAINMENT?hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=movement+OR+tiktok+OR+%22goes+viral%22+OR+outrage+when:6h&hl=en-US&gl=US&ceid=US:en",
 ]
 
 
