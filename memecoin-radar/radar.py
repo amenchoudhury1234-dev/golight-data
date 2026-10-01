@@ -1788,22 +1788,61 @@ def exit_check():
         elif m["price"] <= (1 - EXIT_DROP_FROM_PEAK) * e["peak"] or m["liq"] < 1000:
             EXITS.pop(a, None)
             drop = 1 - m["price"] / e["peak"]
+            peak_txt = (f"never rose after its {e['kind']} ping" if peak_x < 1.02 else
+                        f"peaked at x{peak_x:.2f} after its {e['kind']} ping")
             send_ntfy(f"FALLING: ${m['symbol']} down {drop:.0%} from its peak (x{x:.2f} vs the ping)",
-                      f"{m['name']} peaked at x{peak_x:.2f} and is now x{x:.2f} vs its {e['kind']} ping "
-                      f"{mins:.0f} min ago. Most of these keep falling. Last follow-up for this coin.\n{stats}",
+                      f"{m['name']} {peak_txt} and is now x{x:.2f} vs the ping price, "
+                      f"{mins:.0f} min later. Most of these keep falling. Last follow-up for this coin.\n{stats}",
                       click=coinbase_url(m), priority="high", tags="warning", actions=check_links(m),
                       topic=FAST_TOPIC)
 
 
+EXIT_POLL_S = 5   # follow-ups look every 5s (was 15: MUSE's FALLING ping came at -48%, not -30%). PumpPortal's
+                  # live trade stream needs an API key funded from a SOL wallet - not used (no wallets, user rule).
+
+
 async def early_story_loop(state):
     loop = asyncio.get_running_loop()
+    last_slow = 0.0
     while True:
-        for fn in (early_check, exit_check, second_look_check):
+        fns = [exit_check]
+        if time.time() - last_slow >= EARLY_POLL_S:
+            last_slow = time.time()
+            fns += [early_check, second_look_check]
+        for fn in fns:
             try:
                 await loop.run_in_executor(None, fn)
             except Exception as e:
                 log(f"{fn.__name__} error: {e}")
-        await asyncio.sleep(EARLY_POLL_S)
+        await asyncio.sleep(EXIT_POLL_S)
+
+
+# 3) FAST EARLY (record-only, 1 Oct): MUSE moved off pump.fun at $41K and pinged at $70K, near the top of a short
+#    staged pump. Would a lower bar ($45K, 1.3x rise, 80% of the buys/volume bar) catch more of the run, or just
+#    more losers? Logged once per coin as "FAST EARLY" (paper only); the real FAST LOTTO rule is untouched.
+FAST_EARLY_MIN_MCAP = 45_000
+FAST_EARLY_MIN_RISE = 1.3
+FAST_EARLY_BAR = 0.8
+_FAST_EARLY_SEEN = set()
+
+
+def fast_early_paper(mint, m, rise):
+    if mint in _FAST_EARLY_SEEN:
+        return
+    buys_bar, vol_bar = _fast_bar(m["age_h"] * 60)
+    if (FAST_EARLY_MIN_MCAP <= m["mcap"] <= FAST_MAX_MCAP
+            and (rise >= FAST_EARLY_MIN_RISE or m["chg_m5"] >= 50)
+            and m["buys_m5"] >= buys_bar * FAST_EARLY_BAR and m["buys_m5"] >= FAST_BUY_RATIO * max(m["sells_m5"], 1)
+            and m["vol_m5"] >= vol_bar * FAST_EARLY_BAR and not dumping_now(m)):
+        _FAST_EARLY_SEEN.add(mint)
+        if len(_FAST_EARLY_SEEN) > 5000:
+            _FAST_EARLY_SEEN.clear()
+        ok, notes, _ = rugcheck(mint)
+        if ok:
+            SHADOW_SEEN.pop(mint, None)
+            log_candidate("FAST EARLY", m, False, ["paper only"],
+                          {"rise": round(rise, 2), "avg_trade": round(m["vol_m5"] / max(m["buys_m5"] + m["sells_m5"], 1)),
+                           "insider_net": "insider network" in notes})
 
 
 def fast_lotto_check(mint, first_mcap):
@@ -1817,6 +1856,8 @@ def fast_lotto_check(mint, first_mcap):
     day = time.strftime("%Y-%m-%d")
     if _FAST["day"] != day:
         _FAST.update(day=day, n=0, seen=set())
+    # own thread: its RugCheck (~1s) must never delay a real FAST LOTTO ping
+    threading.Thread(target=fast_early_paper, args=(mint, m, rise), daemon=True).start()
     th = theme_match(m["name"], m["symbol"])
     buys_bar, vol_bar = _fast_bar(m["age_h"] * 60)
     min_mcap, min_rise = FAST_MIN_MCAP, FAST_MIN_RISE
@@ -2587,7 +2628,7 @@ def scorecard_text(hours=24):
         return (f"{label} {len(grp)} (2x: {sum((p.get('peak_x') or 0) >= 2 for p in grp)}, "
                 f"5x: {sum((p.get('peak_x') or 0) >= 5 for p in grp)}, lotto {_gbp(sum(_pnl(p, 'lotto') or 0 for p in grp))})")
     tests = []
-    for kind in ("SECOND LOOK", "EARLY STORY"):
+    for kind in ("SECOND LOOK", "EARLY STORY", "FAST EARLY"):
         grp = [p for p in shadow if p["kind"] == kind and "paper only" in (p.get("reasons") or [])]
         if grp:
             tests.append(grp_line(kind, grp))
