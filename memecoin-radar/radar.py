@@ -1695,6 +1695,20 @@ def exit_add(mint, m, kind):
                        "rc2": False}
 
 
+RC_SNAP_S = (0, 45, 120, 300)
+
+
+def rc_counts(mint):
+    """[insider networks, linked insider wallets, holders] from a fresh RugCheck report (None on failure)."""
+    try:
+        r = http_json(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report")
+        time.sleep(1.0)
+        return [len(r.get("insiderNetworks") or []), int(r.get("graphInsidersDetected") or 0),
+                int(r.get("totalHolders") or 0)]
+    except Exception:
+        return None
+
+
 def _flag_ping(addr, kind, **fl):
     """Add record-only test results to the newest pings_log entry for this coin + kind."""
     with PINGS_LOCK:
@@ -1773,6 +1787,15 @@ def exit_check():
             _rc_cache.pop(a, None)
             ok2, notes2, _ = rugcheck(a)
             _flag_ping(a, e["kind"], rc2_ok=ok2, rc2_insider_net="insider network" in notes2)
+        # record-only: when do linked wallets show up? (1 Oct, now: runners WIRED/Alonmas/𝕏/ACC had 4/0/0 linked
+        # wallets and 800-4,100 holders; rugs Heinrich/YAP/LEAFRA/MUSE had 235/135/33/16 and 235-814 holders -
+        # but at the ping most showed none). Snapshot at 0s, 45s, 2 min and 5 min after the ping.
+        done = e.setdefault("rcs", set())
+        for off in RC_SNAP_S:
+            if off not in done and now - e["t"] >= off:
+                done.add(off)
+                _flag_ping(a, e["kind"], **{f"rc_{off}s": rc_counts(a)})
+                break                       # one RugCheck call per pass (~1/s limit)
     for a, p in dex_pairs_for_tokens("solana", list(EXITS)).items():
         e = EXITS.get(a)
         m = metrics(p)
@@ -1819,7 +1842,10 @@ def exit_restore():
                 and now - p["t"] < EXIT_WATCH_MINUTES * 60
                 and (p.get("last_x") or 1) > (1 - EXIT_DROP_AFTER_2X) * (p.get("peak_x") or 1)):  # not already crashed
             EXITS[p["addr"]] = {"t": p["t"], "price": p["price"], "peak": p["price"] * (p.get("peak_x") or 1),
-                                "kind": p["kind"], "sent2x": (p.get("peak_x") or 1) >= 2, "rc2": True}
+                                "kind": p["kind"], "sent2x": (p.get("peak_x") or 1) >= 2, "rc2": True,
+                                # snapshots whose moment passed during the restart are skipped, not taken late
+                                "rcs": {off for off in RC_SNAP_S
+                                        if f"rc_{off}s" in (p.get("f") or {}) or now - p["t"] > off + 30}}
     if EXITS:
         names = {p["addr"]: p["symbol"] for p in pings if p.get("addr") in EXITS}
         log(f"follow-ups restored after restart: {', '.join(names.values())}")
