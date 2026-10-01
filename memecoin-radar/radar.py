@@ -600,6 +600,8 @@ def story_backing(flags):
     if phrase in load_keywords():
         srcs.add("manual")
     strong = bool(srcs & STRONG_SOURCES) or len(srcs & WEAK_SOURCES) >= 2
+    if " " not in phrase.strip() and not phrase.startswith("@") and len(srcs) < 2 and "manual" not in srcs:
+        strong = False      # one word from one source ("industries" in one Trump post) isn't a story
     return phrase, sorted(srcs), strong
 
 
@@ -1434,6 +1436,8 @@ class AutoKeywords:
         self.last_harvest = 0
 
     def add(self, phrase, source, now=None):
+        if " " not in phrase.strip() and phrase.strip().lower() in COMMON_WORDS:
+            return
         now = now or time.time()
         self.seen.setdefault(phrase, now)
         self.src.setdefault(phrase, {})[source] = now
@@ -1736,7 +1740,16 @@ open close closed start started end ended done fly flying flight launch launched
 amazing awesome incredible cool nice wow huge massive major important interesting exactly absolutely
 company business market money price stock stocks deal deals plan plans report update support system service
 power energy water fire earth space future past present history order orders law laws rule rules vote votes
-country nation state states city america american president government house senate congress""".split())
+country nation state states city america american president government house senate congress
+industry industries industrial jobs job workers worker economy economic trade trades tariff tariffs tax taxes
+billion billions trillion dollar dollars quarter percent record records growth investment investments factory
+factories manufacturing companies corporation bank banks fund funds stock crypto coin coins token tokens meme memes
+military war peace border security deal agreement court judge case cases trial crime police school schools
+health care hospital doctor drugs medical media fake press report reports reporter statement official officials
+leader leaders party democrat democrats republican republicans election elections campaign poll polls voters
+history historic win winning wins loss lost success successful failed failure disaster total complete beautiful
+strong weak smart stupid crazy sad tremendous incredible fantastic terrible horrible wonderful happy thank thanks
+everyone everybody nobody somebody something nothing anything family friend friends nation's world's""".split())
 
 
 def vip_phrases(text):
