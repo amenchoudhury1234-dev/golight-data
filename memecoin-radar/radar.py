@@ -2170,6 +2170,12 @@ async def fast_lotto_watch(mint):
             log(f"migration log error: {e}")
 
 
+PP_SILENT_S = 180                 # no PumpPortal launch for 3 min = dead feed -> reconnect + backup feed
+PP_ALERT_S = 20 * 60              # phone alert after 20 min of silence
+_PP = {"last": time.time(), "alerted": False}
+_MIGRATED_SEEN = {}               # mint -> time (PumpPortal and the backup feed both report migrations)
+
+
 async def graduations_loop(state):
     try:
         import websockets  # noqa
@@ -2199,13 +2205,70 @@ async def graduations_loop(state):
                                        f"Migrated off pump.fun ~{GRAD_RECHECK_MINUTES} min ago and still holding. "
                                        f"Migration is where GOCARDS got dumped - be quick with stops.")
 
+    def on_migration(mint, src="PumpPortal"):
+        if not mint or mint in _MIGRATED_SEEN:
+            return
+        _MIGRATED_SEEN[mint] = time.time()
+        if len(_MIGRATED_SEEN) > 5000:
+            for k in sorted(_MIGRATED_SEEN, key=_MIGRATED_SEEN.get)[:2500]:
+                _MIGRATED_SEEN.pop(k, None)
+        if src != "PumpPortal":
+            log(f"migration via {src} backup: {mint[:8]}...")
+        hot_add(mint, "solana")
+        asyncio.create_task(recheck(mint))
+        asyncio.create_task(fast_lotto_watch(mint))
+
+    async def backup_feed():
+        """2 Oct: PumpPortal went silent at ~09:00 (connected + 'subscribed', zero events - probably a temporary block
+        after many reconnects) and the fast channel was blind for 2.5h without a word. While it's silent, poll
+        GeckoTerminal's new Solana pools for PumpSwap pools (= coins that just moved off pump.fun). Partial coverage:
+        the list is mostly brand-new pump.fun launches and the shared GeckoTerminal gap is 8s."""
+        while True:
+            await asyncio.sleep(16)
+            if time.time() - _PP["last"] < PP_SILENT_S:
+                continue
+            try:
+                d = await loop.run_in_executor(None, gecko_json,
+                                               "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1")
+                for pool in (d or {}).get("data") or []:
+                    rel = pool.get("relationships") or {}
+                    if ((rel.get("dex") or {}).get("data") or {}).get("id") == "pumpswap":
+                        base = ((rel.get("base_token") or {}).get("data") or {}).get("id", "")
+                        on_migration(base.split("_", 1)[-1], "GeckoTerminal")
+            except Exception as e:
+                log(f"backup feed: {e}")
+
+    async def silence_alarm():
+        while True:
+            await asyncio.sleep(60)
+            silent = time.time() - _PP["last"]
+            if silent > PP_ALERT_S and not _PP["alerted"]:
+                _PP["alerted"] = True
+                send_ntfy("Radar: new-coin feed is DOWN",
+                          f"PumpPortal has sent nothing for {silent / 60:.0f} min. FAST LOTTO is running on a partial "
+                          "backup (GeckoTerminal) and will miss some coins. The radar keeps reconnecting by itself; "
+                          "you'll get a ping when it's back.", priority="default", tags="warning", topic=FAST_TOPIC)
+            elif silent < PP_SILENT_S and _PP["alerted"]:
+                _PP["alerted"] = False
+                send_ntfy("Radar: new-coin feed is back", "PumpPortal is sending launches and migrations again - "
+                          "FAST LOTTO back to full coverage.", priority="default", tags="white_check_mark",
+                          topic=FAST_TOPIC)
+
+    asyncio.create_task(backup_feed())
+    asyncio.create_task(silence_alarm())
+    backoff = 15
     while True:
         try:
             async with websockets.connect("wss://pumpportal.fun/api/data", ping_interval=20) as ws:
                 await ws.send(json.dumps({"method": "subscribeMigration"}))
                 await ws.send(json.dumps({"method": "subscribeNewToken"}))
                 log("connected to PumpPortal (new launches + graduations)")
-                async for raw in ws:
+                while True:
+                    # watchdog: pump.fun launches arrive every few seconds; 3 min of nothing = a dead feed
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=PP_SILENT_S)
+                    except asyncio.TimeoutError:
+                        raise RuntimeError(f"no launches for {PP_SILENT_S // 60} min (silent feed)")
                     try:
                         msg = json.loads(raw)
                     except Exception:
@@ -2213,6 +2276,8 @@ async def graduations_loop(state):
                     mint = msg.get("mint")
                     if not mint:
                         continue
+                    _PP["last"] = time.time()
+                    backoff = 15
                     if msg.get("txType") == "create":     # brand-new pump.fun launch
                         nursery_add(mint)
                         launch_cluster_note(msg.get("name"), msg.get("symbol"), msg.get("traderPublicKey") or mint)
@@ -2232,12 +2297,11 @@ async def graduations_loop(state):
                             log(f"story launch: ${msg.get('symbol')} matches \"{hit[0]}\" ({hit[1]}) - watching")
                             asyncio.create_task(story_launch_watch(state, mint, hit[0], hit[1]))
                     else:                                  # migration off the bonding curve
-                        hot_add(mint, "solana")
-                        asyncio.create_task(recheck(mint))
-                        asyncio.create_task(fast_lotto_watch(mint))
+                        on_migration(mint)
         except Exception as e:
-            log(f"PumpPortal connection lost ({e}); reconnecting in 15s")
-            await asyncio.sleep(15)
+            log(f"PumpPortal connection lost ({e}); reconnecting in {backoff}s")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 600)     # one polite connection: back off instead of hammering a silent feed
 
 
 # ----------------------------- SMART WALLETS (follow wallets, not influencers) -----------------------------
