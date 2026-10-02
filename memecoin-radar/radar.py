@@ -1630,6 +1630,36 @@ def early_add(mint, theme, src, symbol):
     log(f'early story: ${symbol} matches hot theme "{theme}" ({src}) - watching every {EARLY_POLL_S}s')
 
 
+# Developer history + curve fill (2 Oct upgrade, record-first). Every pump.fun launch arrives with its creator wallet,
+# so at migration we know how long the curve took to fill and how many coins that creator launched in the last 24h
+# (serial launchers = the classic rug factory). Coins created before the radar started have no data.
+MINT_META = {}        # mint -> (created_at, creator)
+CREATOR_TIMES = {}    # creator -> [launch times in the last 24h]
+
+
+def dev_note(mint, creator):
+    now = time.time()
+    if not mint or not creator:
+        return
+    MINT_META[mint] = (now, creator)
+    ts = [t for t in CREATOR_TIMES.get(creator, []) if now - t < 86400] + [now]
+    CREATOR_TIMES[creator] = ts
+    if len(MINT_META) > 80_000:        # ~a day of launches; drop the oldest half
+        for k in sorted(MINT_META, key=lambda k: MINT_META[k][0])[:40_000]:
+            MINT_META.pop(k, None)
+        for c in [c for c, v in CREATOR_TIMES.items() if now - v[-1] > 86400]:
+            CREATOR_TIMES.pop(c, None)
+
+
+def dev_features(mint):
+    meta = MINT_META.get(mint)
+    if not meta:
+        return {}
+    created, creator = meta
+    return {"fill_min": round((time.time() - created) / 60, 1),
+            "dev_launches_24h": sum(1 for t in CREATOR_TIMES.get(creator, []) if time.time() - t < 86400)}
+
+
 def note_create(mint, name, symbol):
     """Every new pump.fun launch: remember it for an hour, and watch it now if it matches a live theme."""
     now = time.time()
@@ -1739,7 +1769,7 @@ def _tier_read(mint, s):
     # User asked to see it on the fast channel, colour-coded (ntfy can't colour text; the tag emoji is the colour).
     m = {"name": s.get("name", sym), "symbol": sym, "addr": mint, "chain": "solana", "url": s.get("url", "")}
     good = tier == "CONFIRMED"
-    send_ntfy(f"{tier}: ${sym} ({(rise - 1) * 100:+.0f}% in {TIER_AT_S}s)",
+    send_ntfy(f"{'BUY WINDOW' if good else 'FADING'}: ${sym} ({(rise - 1) * 100:+.0f}% in {TIER_AT_S}s)",
               f"{read}\n" + ("Still rising 45s after the ping. In the 2 Oct review every coin like this gave a window "
                              "(1.2-2.15x from the ping) - but buying NOW is a higher price: from here they offered "
                              "~1.0-1.9x. Sell into strength."
@@ -2030,6 +2060,8 @@ def fast_lotto_check(mint, first_mcap):
     first_look = not first_mcap
     first_mcap = first_mcap or m["mcap"]
     rise = m["mcap"] / first_mcap if first_mcap else 1
+    rec = _MIG.setdefault(mint, {"m0": m, "best": 1.0, "result": "no ping"})     # migration dataset (see below)
+    rec["best"], rec["last"] = max(rec["best"], rise), m
     # DexScreener's "+X% in 5 min" counts the pool's opening jump, so it only stands in for a rise on our FIRST look
     # (no baseline yet). 1 Oct: $SpaceX passed at x1.1 since our first look because its 5-min change read +866%.
     chg_ok = first_look and m["chg_m5"] >= 50
@@ -2053,16 +2085,24 @@ def fast_lotto_check(mint, first_mcap):
     ok, notes, verified = rugcheck(mint)
     _FAST["seen"].add(mint)
     if not ok:
+        rec["result"] = "safety"
         log(f"fast lotto: ${m['symbol']} taking off but failed safety: {notes.split('REJECT: ')[-1][:80]}")
         log_candidate("FAST LOTTO", m, False, ["safety"])
         return first_mcap
     copy_of = _fast_copycat_of(m) or ("RugCheck copycat" if _rc_copycat(mint) else None)
     if copy_of:
+        rec["result"] = "copycat"
         log(f"fast lotto: ${m['symbol']} taking off but it's a copycat of {copy_of} - skipped (paper-logged)")
         log_candidate("FAST LOTTO", m, False, ["copycat"], {"copy_of": copy_of})
         return first_mcap
+    rec["result"] = "pinged"
     _FAST["n"] += 1
-    body = (f"{m['name']} (${m['symbol']}) just moved off pump.fun and is TAKING OFF: {fmt_usd(first_mcap)} -> "
+    dev = dev_features(mint)
+    night = not 8 <= datetime.now().hour < 23
+    body = ("WATCH - wait ~45s for the read: BUY WINDOW (green) or FADING (red) before buying.\n"
+            + (f"Dev launched {dev['dev_launches_24h']} coin(s) in 24h | curve filled in {dev['fill_min']:.0f} min\n"
+               if dev else "")
+            + f"{m['name']} (${m['symbol']}) just moved off pump.fun and is TAKING OFF: {fmt_usd(first_mcap)} -> "
             f"{fmt_usd(m['mcap'])} in ~{max(1, round(m['age_h'] * 60))} min.\n"
             f"5m: {m['buys_m5']}/{m['sells_m5']} buys/sells, vol {fmt_usd(m['vol_m5'])} | Liq {fmt_usd(m['liq'])}\n"
             f"CA: {mint}\n{notes}\n"
@@ -2077,30 +2117,57 @@ def fast_lotto_check(mint, first_mcap):
     if send_ntfy(f"FAST LOTTO{' + STORY' if th else ''}: ${m['symbol']} {fmt_usd(m['mcap'])} "
                  f"(x{rise:.1f} since migration)", body,
                  click=coinbase_url(m),
-                 priority="high", tags="zap", actions=check_links(m), topic=FAST_TOPIC):
+                 # night (23-08h) pings arrive silently: 2/10 doubled overnight vs 5/10 in the evening (2 Oct)
+                 priority="low" if night else "high", tags="zap", actions=check_links(m), topic=FAST_TOPIC):
         avg_trade = m["vol_m5"] / max(m["buys_m5"] + m["sells_m5"], 1)
         log_ping("FAST LOTTO", m, {"rise": round(rise, 2), "verified": verified,
                                    "avg_trade": round(avg_trade), "insider_net": "insider network" in notes,
                                    "first_look": first_look, "first_mcap": round(first_mcap),
                                    "pump_addr": mint.endswith("pump"),
                                    # 2 Oct: 18-23h pings 5/10 doubled, 23-08h 2/10 - recorded, not filtered (yet)
-                                   "night": not 8 <= datetime.now().hour < 23,
+                                   "night": night, **dev,
                                    **({"story": th[0], "launch_src": th[1]} if th else {})})
         exit_add(mint, m, "FAST LOTTO")
     return first_mcap
 
 
+# Migration dataset (2 Oct, record-only): every coin that moves off pump.fun is logged once as "MIGRATION" - first-look
+# metrics, best rise in the 4-min watch, what FAST LOTTO did with it, dev history, curve fill time - and paper-tracked
+# like any ping. After 1-2 weeks that's thousands of coins to find which signals really predict a run (until now only
+# pinged or near-miss coins had outcomes, so "how does a ping compare with the whole field?" was unanswerable).
+_MIG = {}
+
+
+def _log_migration(mint):
+    rec = _MIG.pop(mint, None)
+    if not rec:
+        return
+    m0 = rec["m0"]
+    SHADOW_SEEN.pop(mint, None)
+    log_candidate("MIGRATION", m0, False, ["dataset"],
+                  {"fast": rec["result"], "best_rise_4m": round(rec["best"], 2), "first_mcap": round(m0["mcap"]),
+                   "avg_trade": round(m0["vol_m5"] / max(m0["buys_m5"] + m0["sells_m5"], 1)),
+                   "night": not 8 <= datetime.now().hour < 23, "pump_addr": mint.endswith("pump"),
+                   **dev_features(mint)})
+
+
 async def fast_lotto_watch(mint):
     loop = asyncio.get_running_loop()
     start, first = time.time(), None
-    for s_ in FAST_CHECKS_S:
-        await asyncio.sleep(max(0, start + s_ - time.time()))
+    try:
+        for s_ in FAST_CHECKS_S:
+            await asyncio.sleep(max(0, start + s_ - time.time()))
+            try:
+                first = await loop.run_in_executor(None, fast_lotto_check, mint, first)
+            except Exception as e:
+                log(f"fast lotto error: {e}")
+            if mint in _FAST["seen"]:
+                return
+    finally:
         try:
-            first = await loop.run_in_executor(None, fast_lotto_check, mint, first)
+            await loop.run_in_executor(None, _log_migration, mint)
         except Exception as e:
-            log(f"fast lotto error: {e}")
-        if mint in _FAST["seen"]:
-            return
+            log(f"migration log error: {e}")
 
 
 async def graduations_loop(state):
@@ -2150,6 +2217,7 @@ async def graduations_loop(state):
                         nursery_add(mint)
                         launch_cluster_note(msg.get("name"), msg.get("symbol"), msg.get("traderPublicKey") or mint)
                         note_create(mint, msg.get("name"), msg.get("symbol"))
+                        dev_note(mint, msg.get("traderPublicKey"))
                         for a in [a for a, v in STORY_LAUNCHES.items() if time.time() - v[0] > 3600]:
                             STORY_LAUNCHES.pop(a, None)
                         hit = story_launch_match(msg.get("name"), msg.get("symbol"))
@@ -2625,17 +2693,51 @@ SHADOW_SEEN = {}
 
 
 def _load_pings():
+    path = os.path.join(HERE, PINGS_FILE)
     try:
-        with open(os.path.join(HERE, PINGS_FILE)) as f:
+        with open(path) as f:
             return json.load(f)
-    except Exception:
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        # never let a damaged file turn into an empty history that the next save writes over: keep a copy and stop
+        # saving until someone looks at it (pings still go out; only the paper log pauses)
+        if not _PINGS_STATE["frozen"]:
+            _PINGS_STATE["frozen"] = True
+            bad = path + f".bad-{int(time.time())}"
+            try:
+                import shutil
+                shutil.copy(path, bad)
+            except Exception:
+                pass
+            log(f"pings log unreadable ({e}) - copied to {os.path.basename(bad)}; paper log paused (ask Claude)")
+            send_ntfy("Radar: paper log paused", f"pings_log.json could not be read ({e}). Pings still work; the "
+                      "scorecard is paused so nothing gets overwritten. Ask Claude to repair it.", priority="default",
+                      tags="warning")
         return []
 
 
+PINGS_KEEP = 5000      # was 3000; the migration dataset adds a few hundred entries a day
+_PINGS_STATE = {"frozen": False}
+PINGS_ARCHIVE = "pings_archive.jsonl"   # entries rolled out of pings_log.json - kept for reviews, never rewritten
+
+
 def _save_pings(pings):
+    """Atomic write (tmp file + rename): 2 Oct, a read caught the file half-written; a crash mid-write would have
+    made _load_pings() return [] and the next save would have wiped the history. Entries beyond PINGS_KEEP (it was
+    already full - 30 Sep data was being dropped) go to an append-only archive instead of being discarded."""
+    path = os.path.join(HERE, PINGS_FILE)
+    if _PINGS_STATE["frozen"]:
+        return
     try:
-        with open(os.path.join(HERE, PINGS_FILE), "w") as f:
-            json.dump(pings[-3000:], f)
+        if len(pings) > PINGS_KEEP:
+            with open(os.path.join(HERE, PINGS_ARCHIVE), "a", encoding="utf-8") as f:
+                for p in pings[:-PINGS_KEEP]:
+                    f.write(json.dumps(p) + "\n")
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(pings[-PINGS_KEEP:], f)
+        os.replace(tmp, path)
     except Exception as e:
         log(f"could not save pings log: {e}")
 
@@ -2823,6 +2925,9 @@ def scorecard_text(hours=24):
         return (f"{label} {len(grp)} (2x: {sum((p.get('peak_x') or 0) >= 2 for p in grp)}, "
                 f"5x: {sum((p.get('peak_x') or 0) >= 5 for p in grp)}, lotto {_gbp(sum(_pnl(p, 'lotto') or 0 for p in grp))})")
     tests = []
+    mig = [p for p in shadow if p["kind"] == "MIGRATION"]
+    if mig:
+        tests.append(grp_line("ALL migrations (base rate)", mig))
     for kind in ("SECOND LOOK", "EARLY STORY", "FAST EARLY"):
         grp = [p for p in shadow if p["kind"] == kind and "paper only" in (p.get("reasons") or [])]
         if grp:
