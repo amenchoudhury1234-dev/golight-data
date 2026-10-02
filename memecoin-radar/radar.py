@@ -1710,41 +1710,45 @@ RC_TRACK = {}   # mint -> {"t", "kind", "done": set of snapshot offsets taken, "
 RUN_CHECK_S = 600
 RUN_MIN_X = 3.0
 TIER_AT_S = 45
-TIER_MIN_HOLDER_GROWTH = 1.2
+TIER_MIN_RISE_45S = 1.10        # market cap 45s after the ping vs at the ping
 TIER_MAX_LINKED = 5
+# 2 Oct review of the 10 fast pings with 45s data: holder growth mislabelled FIX6900 and MIC (both ~2x) as QUICK FLIP.
+# PRICE DIRECTION at 45s split all 10: up 10%+ -> every one gave a 1.2-2.15x window (FIX6900 +15%, MIC +19%,
+# AI#2 +60%, Netizen +20%, DIT +37%); flat/down -> every one died with no window (will +2%, AI#1 -25%,
+# Slopcoin -27%, KEN -16%, TECH -5%). Bought AT the green ping, those five then offered ~1.0-1.9x - so the red is the
+# more valuable signal ("don't buy / get out"). Holder growth is still shown in the text.
 
 
 def _tier_read(mint, s):
     h0, h2 = (s["snaps"].get(0) or [0, 0, 0]), (s["snaps"].get(TIER_AT_S) or [0, 0, 0])
-    if not (h0[2] and h2[2]):
+    m0, m45 = (s.get("mk") or {}).get(0), (s.get("mk") or {}).get(TIER_AT_S)
+    if not (m0 and m45):
         return
-    growth, linked = h2[2] / h0[2], max(h0[1], h2[1])
-    # "REAL BUYERS" (was "RUNNER SIGNS"): TRUMP had this profile (holders 1,231 -> 4,499, 0-5 linked) but peaked at
-    # 2.6x and faded - it means "more time to sell", not "will run like WIRED".
-    tier = "REAL BUYERS" if growth >= TIER_MIN_HOLDER_GROWTH and linked <= TIER_MAX_LINKED else "QUICK FLIP"
-    _flag_ping(mint, s["kind"], tier=tier, holder_growth=round(growth, 2))
-    read = (f"Holders {h0[2]:,} -> {h2[2]:,} in {TIER_AT_S}s (+{(growth - 1) * 100:.0f}%), "
-            f"{linked} linked insider wallets.")
+    rise, linked = m45 / m0, max(h0[1], h2[1])
+    growth = h2[2] / h0[2] if h0[2] and h2[2] else None
+    tier = "CONFIRMED" if rise >= TIER_MIN_RISE_45S and linked <= TIER_MAX_LINKED else "FADING"
+    _flag_ping(mint, s["kind"], tier=tier, rise_45s=round(rise, 2),
+               **({"holder_growth": round(growth, 2)} if growth else {}))
+    read = (f"Market cap {fmt_usd(m0)} -> {fmt_usd(m45)} in {TIER_AT_S}s ({(rise - 1) * 100:+.0f}%)"
+            + (f", holders {(growth - 1) * 100:+.0f}%" if growth else "") + f", {linked} linked insider wallets.")
     sym = s.get("symbol", mint[:6])
-    log(f"tier: ${sym} {tier} - holders x{growth:.2f}, {linked} linked")
+    log(f"tier: ${sym} {tier} - mcap x{rise:.2f} in {TIER_AT_S}s, {linked} linked")
     if mint not in EXITS:          # FALLING already went out: a label now would only be noise
         return
     EXITS[mint]["read"] = read
-    if tier == "REAL BUYERS":
-        # Record-only on the phone (1 Oct): green at 45s confused - TRUMP got it and "only" did 2.6x. The phone's green
-        # is STILL RUNNING at 10 min instead (see exit_check); the red QUICK FLIP warning stays.
-        return
     # User asked to see it on the fast channel, colour-coded (ntfy can't colour text; the tag emoji is the colour).
     m = {"name": s.get("name", sym), "symbol": sym, "addr": mint, "chain": "solana", "url": s.get("url", "")}
-    runner = tier == "REAL BUYERS"
-    send_ntfy(f"{tier}: ${sym}",
-              f"{read}\n" + ("Real buyers piling in, no insider cluster - so far these gave a window to sell (WIRED "
-                             "38x, TRUMP 2.6x then faded). NOT a promise of a big run."
-                             if runner else
-                             "Slow holder growth or an insider cluster - looks like the quick rugs (SHARED, YAP).")
-              + f"\nEARLY READ, UNPROVEN: being tested until ~8 Oct (scorecard 'label' line).\nCA: {mint}",
-              click=coinbase_url(m), priority="high" if runner else "default",
-              tags="green_circle" if runner else "red_circle", actions=check_links(m), topic=FAST_TOPIC)
+    good = tier == "CONFIRMED"
+    send_ntfy(f"{tier}: ${sym} ({(rise - 1) * 100:+.0f}% in {TIER_AT_S}s)",
+              f"{read}\n" + ("Still rising 45s after the ping. In the 2 Oct review every coin like this gave a window "
+                             "(1.2-2.15x from the ping) - but buying NOW is a higher price: from here they offered "
+                             "~1.0-1.9x. Sell into strength."
+                             if good else
+                             "Flat or falling 45s after the ping. In the 2 Oct review every coin like this died with no "
+                             "window (best 1.15x). Don't buy; if you're in, get out.")
+              + f"\nBased on 10 coins - being tested (scorecard 'label' line).\nCA: {mint}",
+              click=coinbase_url(m), priority="high", tags="green_circle" if good else "red_circle",
+              actions=check_links(m), topic=FAST_TOPIC)
 
 
 def rc_counts(mint):
@@ -1854,6 +1858,7 @@ def exit_check():
             if p_:
                 mm = metrics(p_)
                 mk = {f"mk_{todo[0]}s": [round(mm["mcap"]), mm["buys_m5"], mm["sells_m5"]]}
+                s.setdefault("mk", {})[todo[0]] = mm["mcap"]
             _flag_ping(a, s["kind"], **{f"rc_{todo[0]}s": counts}, **mk)
             if todo[0] == TIER_AT_S:
                 _tier_read(a, s)
@@ -1893,6 +1898,7 @@ def exit_check():
         elif (m["price"] <= (1 - (EXIT_DROP_AFTER_2X if e["sent2x"] else EXIT_DROP_FROM_PEAK)) * e["peak"]
               or m["liq"] < 1000):
             EXITS.pop(a, None)
+            _flag_ping(a, e["kind"], falling_sent=True)   # a restart must not re-arm it (TRUMP/FIX6900 got 2 each)
             drop = 1 - m["price"] / e["peak"]
             peak_txt = (f"never rose after its {e['kind']} ping" if peak_x < 1.02 else
                         f"peaked at x{peak_x:.2f} after its {e['kind']} ping")
@@ -1922,9 +1928,11 @@ def exit_restore():
                                    "name": p.get("name", "?"), "url": p.get("url", ""),
                                    "snaps": {int(k[3:-1]): v for k, v in (p.get("f") or {}).items()
                                              if k.startswith("rc_") and k.endswith("s") and k[3:-1].isdigit()},
+                                   "mk": {int(k[3:-1]): v[0] for k, v in (p.get("f") or {}).items()
+                                          if k.startswith("mk_") and k.endswith("s") and k[3:-1].isdigit() and v},
                                    "done": {off for off in RC_SNAP_S
                                             if f"rc_{off}s" in (p.get("f") or {}) or now - p["t"] > off + 30}}
-        if (now - p["t"] < EXIT_WATCH_MINUTES * 60
+        if (now - p["t"] < EXIT_WATCH_MINUTES * 60 and not (p.get("f") or {}).get("falling_sent")
                 and (p.get("last_x") or 1) > (1 - EXIT_DROP_AFTER_2X) * (p.get("peak_x") or 1)):  # not already crashed
             EXITS[p["addr"]] = {"t": p["t"], "price": p["price"], "peak": p["price"] * (p.get("peak_x") or 1),
                                 "kind": p["kind"], "sent2x": (p.get("peak_x") or 1) >= 2, "rc2": True,
@@ -2075,6 +2083,8 @@ def fast_lotto_check(mint, first_mcap):
                                    "avg_trade": round(avg_trade), "insider_net": "insider network" in notes,
                                    "first_look": first_look, "first_mcap": round(first_mcap),
                                    "pump_addr": mint.endswith("pump"),
+                                   # 2 Oct: 18-23h pings 5/10 doubled, 23-08h 2/10 - recorded, not filtered (yet)
+                                   "night": not 8 <= datetime.now().hour < 23,
                                    **({"story": th[0], "launch_src": th[1]} if th else {})})
         exit_add(mint, m, "FAST LOTTO")
     return first_mcap
@@ -2822,7 +2832,7 @@ def scorecard_text(hours=24):
         cut = [p for p in fl if p["f"]["avg_trade"] < FAST_TEST_MIN_AVG_TRADE]
         tests.append(grp_line(f"FAST LOTTO avg trade <${FAST_TEST_MIN_AVG_TRADE} would skip", cut))
         tests.append(grp_line("2nd RugCheck would skip", [p for p in fl if p["f"].get("rc2_ok") is False]))
-        for tier in ("REAL BUYERS", "QUICK FLIP"):
+        for tier in ("CONFIRMED", "FADING", "REAL BUYERS", "QUICK FLIP"):
             grp = [p for p in fl if p["f"].get("tier") == tier]
             if grp:
                 tests.append(grp_line(f"label {tier}", grp))
