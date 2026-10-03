@@ -2099,7 +2099,17 @@ def fast_lotto_check(mint, first_mcap):
     _FAST["n"] += 1
     dev = dev_features(mint)
     night = not 8 <= datetime.now().hour < 23
+    avg_trade_now = m["vol_m5"] / max(m["buys_m5"] + m["sells_m5"], 1)
+    # 3 Oct review of 1,485 migrations: devs with 6+ launches in 24h -> 6% doubled (264 coins) vs 31% for 1-2;
+    # average trade under $30 -> 5% doubled (472) vs 31-36%. On the 44 real fast pings, blocking them changed little
+    # (34% -> 35%, and would have cut calico 2.5x), so they're shown as warnings, not filters.
+    warns = []
+    if dev and dev["dev_launches_24h"] >= 6:
+        warns.append(f"SERIAL DEV: {dev['dev_launches_24h']} launches in 24h (only ~6% of these double)")
+    if avg_trade_now < 30:
+        warns.append(f"TINY TRADES: ${avg_trade_now:.0f} average (bot volume - only ~5% of these double)")
     body = ("WATCH - wait ~45s for the read: BUY WINDOW (green) or FADING (red) before buying.\n"
+            + "".join(f"WARNING {w}\n" for w in warns)
             + (f"Dev launched {dev['dev_launches_24h']} coin(s) in 24h | curve filled in {dev['fill_min']:.0f} min\n"
                if dev else "")
             + f"{m['name']} (${m['symbol']}) just moved off pump.fun and is TAKING OFF: {fmt_usd(first_mcap)} -> "
