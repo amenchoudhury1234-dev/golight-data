@@ -2017,6 +2017,11 @@ def exit_check():
             continue
         e["peak"] = max(e["peak"], m["price"])
         x, peak_x, mins = m["price"] / e["price"], e["peak"] / e["price"], (now - e["t"]) / 60
+        # record-only (3 Oct): price at 15/30/60s after the ping - can an earlier read than the 45s label work?
+        for off in (15, 30, 60):
+            if f"x{off}" not in e and now - e["t"] >= off:
+                e[f"x{off}"] = round(x, 3)
+                _flag_ping(a, e["kind"], **{f"x_{off}s": round(x, 3)})
         stats = (f"5m: {m['buys_m5']}/{m['sells_m5']} buys/sells, vol {fmt_usd(m['vol_m5'])} | "
                  f"Liq {fmt_usd(m['liq'])}\n" + (e["read"] + "\n" if e.get("read") else "") + f"CA: {a}")
         # STILL RUNNING (green): 1 Oct, ~10 min after the ping the big runners were already 3x+ and climbing (WIRED ~10x
@@ -2169,6 +2174,27 @@ def _rc_copycat(mint):
         return False
 
 
+def quality_score(m0, dev):
+    """Record-only (3 Oct). Across 176 coins reaching the FAST range, +1 each for: curve filled <=5 min, liq/mcap
+    >=0.25, $45K+ at first look, dev's only coin; -1 each for avg trade <$30, dev with 3+ launches. Score 3+ was 29%
+    pure rugs / 58% windows vs 60% / 26% for <=0 on both days - but on the 24 real fast pings it did NOT separate
+    (Cassie 10.8x scored 0, wiw scored 4 and rugged), so it's only logged until more pings can test it."""
+    s = 0
+    if dev.get("fill_min") is not None and dev["fill_min"] <= 5:
+        s += 1
+    if m0.get("mcap") and m0.get("liq", 0) / m0["mcap"] >= 0.25:
+        s += 1
+    if (m0.get("mcap") or 0) >= 45e3:
+        s += 1
+    if dev.get("dev_launches_24h") == 1:
+        s += 1
+    if m0.get("vol_m5", 0) / max(m0.get("buys_m5", 0) + m0.get("sells_m5", 0), 1) < 30:
+        s -= 1
+    if (dev.get("dev_launches_24h") or 0) >= 3:
+        s -= 1
+    return s
+
+
 def fast_lotto_check(mint, first_mcap):
     """One look at a freshly migrated coin. Returns (metrics, first_mcap) and pings if it's taking off."""
     p = dex_pairs_for_tokens("solana", [mint]).get(mint)
@@ -2254,7 +2280,7 @@ def fast_lotto_check(mint, first_mcap):
                                    "first_look": first_look, "first_mcap": round(first_mcap),
                                    "pump_addr": mint.endswith("pump"),
                                    # 2 Oct: 18-23h pings 5/10 doubled, 23-08h 2/10 - recorded, not filtered (yet)
-                                   "night": night, **dev,
+                                   "night": night, **dev, "quality": quality_score(rec["m0"], dev),
                                    **({"story": th[0], "launch_src": th[1]} if th else {})})
         exit_add(mint, m, "FAST LOTTO")
     return first_mcap
