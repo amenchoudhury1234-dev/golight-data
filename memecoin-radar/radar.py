@@ -779,39 +779,117 @@ def serial_copies(m):
     return len(addrs), top["addr"] == m["addr"]
 
 
-_KIND_REC = {"t": 0.0, "rows": {}}
+# ---- Live track records (all computed from pings_log + archive, settled pings only, cached 10 min) ----
+# 3 Oct: the user lost $300 on a STORY LAUNCH ping (Change Lives, $17K, never rose) while that type's record was
+# 2/5 doubled - every ping looked equally confident. 3 Oct review: exits matter more than picks - on 44 fast pings
+# "sell ALL at 2x, out at -30%" returned 0.98 per 1.00 vs 0.64 for the advised "sell half at 2x, no stop"; on main
+# pings "sell ALL at 1.5x" did best (1.13). SLEEPER WAKING doubled 7/9 (1.52 back), CATALYST 0/6 (0.69). So each
+# ping now carries its type's record, the best exit so far for its group, and types with a proven record get louder
+# (BEST TYPE, urgent) or silent (LOW RECORD) automatically.
+_KIND_REC = {"t": 0.0, "rows": {}, "tiers": {}, "exits": {}}
+KIND_QUIET = (6, 0.20, 0.80)     # >= 6 settled pings, < 20% doubled, < 0.80 back -> silent "LOW RECORD"
+KIND_STAR = (6, 0.60, 1.20)      # >= 6 settled pings, >= 60% doubled, >= 1.20 back -> urgent "BEST TYPE"
+EXIT_LABEL = {"rules": "sell half at 2x, out at -30%", "wide": "sell half at 2x, out at -50%",
+              "quick": "sell ALL at 2x, out if it falls 30% below your buy",
+              "quick15": "sell ALL at 1.5x, out if it falls 30% below your buy",
+              "lotto": "sell half at 2x, no stop", "moonbag": "half at 2x, keep 15% forever"}
+
+
+def _sim_back(p, k="quick"):
+    s = (p.get("sim") or {}).get(k)
+    return None if not s else s["realised"] + s["frac"] * (p.get("last_x") or 0)
+
+
+def _kind_refresh():
+    if time.time() - _KIND_REC["t"] <= 600:
+        return
+    rows, tiers, exits, seen = {}, {"CONFIRMED": [], "FADING": []}, {"fast": {}, "main": {}}, set()
+    try:
+        allp = _load_pings()
+        try:
+            with open(os.path.join(HERE, PINGS_ARCHIVE), encoding="utf-8") as f:
+                allp += [json.loads(l) for l in f if l.strip()]
+        except FileNotFoundError:
+            pass
+        for p in allp:
+            if not p.get("pinged") or time.time() - p["t"] < 3 * 3600:     # only coins with a settled outcome
+                continue
+            k = (p["kind"], p["addr"])
+            if k in seen:
+                continue
+            seen.add(k)
+            pk = p.get("peak_x") or 1.0
+            rows.setdefault(p["kind"], []).append((pk, _sim_back(p)))
+            grp = "fast" if p["kind"] in ("FAST LOTTO", "EARLY STORY") else "main"
+            for sk in (p.get("sim") or {}):
+                v = _sim_back(p, sk)
+                if v is not None:
+                    exits[grp].setdefault(sk, []).append(v)
+            f = p.get("f") or {}
+            if p["kind"] == "FAST LOTTO" and f.get("tier") in tiers:
+                m45 = (f.get("mk_45s") or [None])[0]
+                tiers[f["tier"]].append((pk, p["mcap"] * pk / m45 if m45 else None))
+    except Exception:
+        pass
+    _KIND_REC.update(t=time.time(), rows=rows, tiers=tiers, exits=exits)
+
+
+def kind_stats(kind):
+    """(settled pings, doubled, never rose, average back per 1.00 selling all at 2x)"""
+    _kind_refresh()
+    r = _KIND_REC["rows"].get(kind, [])
+    if not r:
+        return 0, 0, 0, None
+    backs = [b for _, b in r if b is not None]
+    return (len(r), sum(x >= 2 for x, _ in r), sum(x < 1.05 for x, _ in r),
+            sum(backs) / len(backs) if backs else None)
+
+
+def kind_grade(kind):
+    n, d2, _, back = kind_stats(kind)
+    if back is None:
+        return ""
+    if n >= KIND_QUIET[0] and d2 / n < KIND_QUIET[1] and back < KIND_QUIET[2]:
+        return "low"
+    if n >= KIND_STAR[0] and d2 / n >= KIND_STAR[1] and back >= KIND_STAR[2]:
+        return "star"
+    return ""
 
 
 def kind_record(kind):
-    """One line with this ping type's own track record (3 Oct: the user lost $300 on a STORY LAUNCH ping - Change
-    Lives at $17K, never rose - while that type's record was 2/5 doubled, 3/5 never rose; every ping looked equally
-    confident). Computed from pings_log + archive, cached 10 min."""
-    if time.time() - _KIND_REC["t"] > 600:
-        rows, seen = {}, set()
-        try:
-            allp = _load_pings()
-            try:
-                with open(os.path.join(HERE, PINGS_ARCHIVE), encoding="utf-8") as f:
-                    allp += [json.loads(l) for l in f if l.strip()]
-            except FileNotFoundError:
-                pass
-            for p in allp:
-                if not p.get("pinged") or time.time() - p["t"] < 3 * 3600:     # only coins with a settled outcome
-                    continue
-                k = (p["kind"], p["addr"])
-                if k in seen:
-                    continue
-                seen.add(k)
-                rows.setdefault(p["kind"], []).append(p.get("peak_x") or 1.0)
-        except Exception:
-            pass
-        _KIND_REC.update(t=time.time(), rows=rows)
-    pk = _KIND_REC["rows"].get(kind, [])
-    if len(pk) < 5:
-        return f"TRACK RECORD: {kind} - only {len(pk)} past ping(s), too few to judge. Treat as HIGH RISK."
-    d2, dead = sum(x >= 2 for x in pk), sum(x < 1.05 for x in pk)
-    risk = "HIGH RISK - lottery size only" if d2 / len(pk) < 0.4 or dead / len(pk) >= 0.5 else "better than most types"
-    return (f"TRACK RECORD: {kind} - {d2}/{len(pk)} doubled, {dead}/{len(pk)} never rose after the ping. {risk}.")
+    """One line with this ping type's own track record."""
+    n, d2, dead, back = kind_stats(kind)
+    if n < 5:
+        return f"TRACK RECORD: {kind} - only {n} past ping(s), too few to judge. Treat as HIGH RISK."
+    grade = kind_grade(kind)
+    risk = ("BEST TYPE so far" if grade == "star" else "LOW RECORD - these now arrive silently" if grade == "low"
+            else "HIGH RISK - lottery size only" if d2 / n < 0.4 or dead / n >= 0.5 else "better than most types")
+    back_txt = f", selling all at 2x gave {back:.2f} per 1.00" if back is not None else ""
+    return f"TRACK RECORD: {kind} - {d2}/{n} doubled, {dead}/{n} never rose{back_txt}. {risk}."
+
+
+def exit_advice(group):
+    """The exit that has made the most on this group's settled pings so far (needs 10+ results per strategy)."""
+    _kind_refresh()
+    ex = _KIND_REC["exits"].get(group, {})
+    scored = [(k, sum(v) / len(v), len(v)) for k, v in ex.items() if len(v) >= 10 and k in EXIT_LABEL]
+    if not scored:
+        return "PLAN: sell ALL at 2x and get out if it falls 30% below your buy price."
+    best = max(scored, key=lambda t: t[1])
+    hold = [t for t in scored if t[0] == "lotto"]
+    return (f"PLAN (best exit on {best[2]} past {group} pings): {EXIT_LABEL[best[0]]} -> {best[1]:.2f} per 1.00"
+            + (f" (holding half with no stop: {hold[0][1]:.2f})." if hold else "."))
+
+
+def tier_record(tier):
+    _kind_refresh()
+    r = _KIND_REC["tiers"].get(tier, [])
+    if tier == "CONFIRMED":
+        f45 = [x for _, x in r if x]
+        return (f"Earlier greens (n={len(f45)}), measured from the 45s price: {sum(x >= 1.5 for x in f45)} reached "
+                f"1.5x, {sum(x >= 2 for x in f45)} reached 2x." if f45 else "")
+    return (f"Earlier reds (n={len(r)}): {sum(x >= 2 for x, _ in r)} doubled from the ping, "
+            f"{sum(x < 1.05 for x, _ in r)} never rose." if r else "")
 
 
 def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
@@ -912,6 +990,9 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
         title = f"{kind}: ${m['symbol']} {fmt_usd(m['mcap'])} ({m['chg_h1']:+.0f}% 1h)"
     if verdict:
         title = ("AI+WEB OK " if verdict.get("deep") else "AI OK ") + title
+    grade = kind_grade(kind)
+    if grade:
+        title = ("BEST TYPE " if grade == "star" else "LOW RECORD ") + title
     body = (
         kind_record(kind) + "\n"
         f"{m['name']} (${m['symbol']}) on {m['chain']}\n"
@@ -920,10 +1001,10 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
         f"5m {m['chg_m5']:+.0f}% | 1h {m['chg_h1']:+.0f}% | buys/sells 1h {m['buys_h1']}/{m['sells_h1']} | age {m['age_h']:.1f}h\n"
         f"{rc_notes}\n{extra}\n"
         f"BEFORE BUYING: tap GMGN - global fees >=1.5 SOL, bundlers/snipers low. Paste CA into Coinbase.\n"
-        f"PLAN (lotto): only GBP20-50 you can lose completely - no stop, most winners dip 50-80% first. "
-        f"Sell half at 2x. Add it to positions.txt for exit alerts."
+        + exit_advice("main") + " Size it to the TRACK RECORD line. Add it to positions.txt for exit alerts."
     )
-    if send_ntfy(title, body, click=coinbase_url(m), priority="urgent" if strong else "high",
+    if send_ntfy(title, body, click=coinbase_url(m),
+                 priority="urgent" if (strong or grade == "star") else "low" if grade == "low" else "high",
                  tags="rotating_light,moneybag" if strong else "rotating_light", actions=check_links(m)):
         state.record(m["addr"], m["mcap"])
         try:   # tell the cloud Catalyst routine we pinged this coin, so it doesn't re-alert it as "new"
@@ -1806,13 +1887,13 @@ def _tier_read(mint, s):
     m = {"name": s.get("name", sym), "symbol": sym, "addr": mint, "chain": "solana", "url": s.get("url", "")}
     good = tier == "CONFIRMED"
     send_ntfy(f"{'BUY WINDOW' if good else 'FADING'}: ${sym} ({(rise - 1) * 100:+.0f}% in {TIER_AT_S}s)",
-              f"{read}\n" + ("Still rising 45s after the ping. In the 2 Oct review every coin like this gave a window "
-                             "(1.2-2.15x from the ping) - but buying NOW is a higher price: from here they offered "
-                             "~1.0-1.9x. Sell into strength."
+              f"{read}\n" + ("Still rising 45s after the ping. " + tier_record("CONFIRMED")
+                             + " Buying now costs more than at the ping - take profit at 1.5-2x; a FALLING ping "
+                             "follows if it turns."
                              if good else
-                             "Flat or falling 45s after the ping. In the 2 Oct review every coin like this died with no "
-                             "window (best 1.15x). Don't buy; if you're in, get out.")
-              + f"\nBased on 10 coins - being tested (scorecard 'label' line).\nCA: {mint}",
+                             "Flat or falling 45s after the ping. " + tier_record("FADING")
+                             + " Don't buy; if you're in, get out.")
+              + f"\nCA: {mint}",
               click=coinbase_url(m), priority="high", tags="green_circle" if good else "red_circle",
               actions=check_links(m), topic=FAST_TOPIC)
 
@@ -1955,8 +2036,9 @@ def exit_check():
         if not e["sent2x"] and x >= 2:
             e["sent2x"] = True
             send_ntfy(f"2x: ${m['symbol']} {fmt_usd(m['mcap'])} (x{x:.1f} since the ping)",
-                      f"{m['name']} is at x{x:.1f} {mins:.0f} min after its {e['kind']} ping. In the lottery plan this "
-                      f"is the sell-half point. You'll get one more ping if it falls 50% from its peak.\n{stats}",
+                      f"{m['name']} is at x{x:.1f} {mins:.0f} min after its {e['kind']} ping. Holding past here has "
+                      f"lost money on average - {exit_advice('fast')} You'll get one more ping if it falls 50% from "
+                      f"its peak.\n{stats}",
                       click=coinbase_url(m), priority="high", tags="moneybag", actions=check_links(m),
                       topic=FAST_TOPIC)
         # After a 2x, swings are bigger: 1 Oct Alonmas got FALLING at x3.58 (-38% from peak), then went to x6.1.
@@ -2159,8 +2241,8 @@ def fast_lotto_check(mint, first_mcap):
                "WARNING: not a standard pump.fun address - Coinbase may not support it (FIX6900 wasn't).\n")
             + (f"STORY: named after the hot theme \"{th[0]}\" ({th[1]}). No AI check. " if th else
                "NO STORY, NO AI CHECK - pure momentum. ")
-            + "Most of these still die within the hour. "
-              "LOTTERY ONLY: GBP10-20 max, sell half at 2x, expect to lose it. 2x / falling follow-ups will come.")
+            + "Most of these still die within the hour. " + exit_advice("fast")
+            + " Lottery-ticket size only. 2x / falling follow-ups will come.")
     if send_ntfy(f"FAST LOTTO{' + STORY' if th else ''}: ${m['symbol']} {fmt_usd(m['mcap'])} "
                  f"(x{rise:.1f} since migration)", body,
                  click=coinbase_url(m),
