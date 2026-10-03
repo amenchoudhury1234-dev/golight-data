@@ -779,6 +779,41 @@ def serial_copies(m):
     return len(addrs), top["addr"] == m["addr"]
 
 
+_KIND_REC = {"t": 0.0, "rows": {}}
+
+
+def kind_record(kind):
+    """One line with this ping type's own track record (3 Oct: the user lost $300 on a STORY LAUNCH ping - Change
+    Lives at $17K, never rose - while that type's record was 2/5 doubled, 3/5 never rose; every ping looked equally
+    confident). Computed from pings_log + archive, cached 10 min."""
+    if time.time() - _KIND_REC["t"] > 600:
+        rows, seen = {}, set()
+        try:
+            allp = _load_pings()
+            try:
+                with open(os.path.join(HERE, PINGS_ARCHIVE), encoding="utf-8") as f:
+                    allp += [json.loads(l) for l in f if l.strip()]
+            except FileNotFoundError:
+                pass
+            for p in allp:
+                if not p.get("pinged") or time.time() - p["t"] < 3 * 3600:     # only coins with a settled outcome
+                    continue
+                k = (p["kind"], p["addr"])
+                if k in seen:
+                    continue
+                seen.add(k)
+                rows.setdefault(p["kind"], []).append(p.get("peak_x") or 1.0)
+        except Exception:
+            pass
+        _KIND_REC.update(t=time.time(), rows=rows)
+    pk = _KIND_REC["rows"].get(kind, [])
+    if len(pk) < 5:
+        return f"TRACK RECORD: {kind} - only {len(pk)} past ping(s), too few to judge. Treat as HIGH RISK."
+    d2, dead = sum(x >= 2 for x in pk), sum(x < 1.05 for x in pk)
+    risk = "HIGH RISK - lottery size only" if d2 / len(pk) < 0.4 or dead / len(pk) >= 0.5 else "better than most types"
+    return (f"TRACK RECORD: {kind} - {d2}/{len(pk)} doubled, {dead}/{len(pk)} never rose after the ping. {risk}.")
+
+
 def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     reals = story_coin_symbols().get(m["symbol"].lstrip("$").upper()) or set()
     if reals and m["addr"] not in reals:
@@ -878,6 +913,7 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     if verdict:
         title = ("AI+WEB OK " if verdict.get("deep") else "AI OK ") + title
     body = (
+        kind_record(kind) + "\n"
         f"{m['name']} (${m['symbol']}) on {m['chain']}\n"
         f"CA: {m['addr']}\n"
         f"MCap {fmt_usd(m['mcap'])} | Liq {fmt_usd(m['liq'])} | Vol 1h {fmt_usd(m['vol_h1'])}\n"
@@ -2109,6 +2145,7 @@ def fast_lotto_check(mint, first_mcap):
     if avg_trade_now < 30:
         warns.append(f"TINY TRADES: ${avg_trade_now:.0f} average (bot volume - only ~5% of these double)")
     body = ("WATCH - wait ~45s for the read: BUY WINDOW (green) or FADING (red) before buying.\n"
+            + kind_record("FAST LOTTO") + "\n"
             + "".join(f"WARNING {w}\n" for w in warns)
             + (f"Dev launched {dev['dev_launches_24h']} coin(s) in 24h | curve filled in {dev['fill_min']:.0f} min\n"
                if dev else "")
