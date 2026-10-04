@@ -1047,6 +1047,47 @@ def gecko_trending_tokens():
     return out
 
 
+# ----------------------------- OLD COIN WAKING (4 Oct: SLOPCORE) -----------------------------
+# SLOPCORE launched 28 Sep, sat quiet, then ran ~$160K -> $1.06M on 3 Oct on the "slopcore" meme - before Elon's
+# "I love SI slopcore" (4 Oct 10:58) took it to $1.7M. Nothing watched OLD coins waking up: the fast channel only sees
+# fresh migrations, runners must be <48h old, sleepers must already be listed. The one sighting (3 Oct 22:42, $1.06M)
+# was held back as a single weak source. Pure momentum pings were 11/11 losers on 30 Sep, so: an old coin waking up
+# (24h+ old, <=$1M, +50% 1h on 5x its normal hourly volume, buyers ahead) pings ONLY if its name matches a live hot
+# theme (launch cluster / VIP post) - the SLOPCORE combination - and still goes through RugCheck + the AI check.
+# Everything else is paper-logged as "OLD COIN WAKING" so the review can test the wider rule.
+OLD_MIN_AGE_H = 24
+OLD_MIN_MCAP, OLD_MAX_MCAP = 50_000, 1_000_000
+OLD_MIN_H1 = 50
+OLD_VOL_MULT = 5
+_OLD_SEEN = {}
+
+
+def old_coin_check(state, m):
+    if not OLD_MIN_MCAP <= m["mcap"] <= OLD_MAX_MCAP:
+        return
+    avg = m["vol_h24"] / 24 if m["vol_h24"] else 0
+    if not (avg > 0 and m["chg_h1"] >= OLD_MIN_H1 and m["vol_h1"] >= OLD_VOL_MULT * avg
+            and m["buys_h1"] > m["sells_h1"] and not dumping_now(m)):
+        return
+    if time.time() - _OLD_SEEN.get(m["addr"], 0) < 6 * 3600:
+        return
+    _OLD_SEEN[m["addr"]] = time.time()
+    mult = m["vol_h1"] / avg
+    th = theme_match(m["name"], m["symbol"])
+    SHADOW_SEEN.pop(m["addr"], None)
+    if not th:
+        log(f"old coin waking (paper only, no hot theme): ${m['symbol']} {fmt_usd(m['mcap'])} "
+            f"{m['age_h'] / 24:.1f}d old, +{m['chg_h1']:.0f}% 1h, volume x{mult:.1f}")
+        log_candidate("OLD COIN WAKING", m, False, ["paper only (no hot theme)"], {"vol_mult": round(mult, 1)})
+        return
+    # "theme" (not "story") so the launch-cluster-only rule doesn't hold it back - the waking volume IS the 2nd signal
+    alert(state, "OLD COIN WAKING", m,
+          f"Old coin ({m['age_h'] / 24:.1f} days) waking up: 1h volume is {mult:.1f}x its normal hour, "
+          f"+{m['chg_h1']:.0f}% in the hour, and its name matches the hot theme \"{th[0]}\" ({th[1]}). "
+          "The SLOPCORE pattern (6 days old, ran ~6x on the meme before Elon tweeted it). NEW signal - unproven.",
+          flags={"theme": th[0], "launch_src": th[1], "vol_mult": round(mult, 1)})
+
+
 async def runners_loop(state):
     loop = asyncio.get_running_loop()
     last_gecko = 0
@@ -1068,6 +1109,8 @@ async def runners_loop(state):
                             and m["vol_h1"] >= RUNNER_MIN_H1_VOLUME and m["chg_h1"] >= RUNNER_MIN_H1_CHANGE)
                     if near:
                         WATCH[m["addr"]] = (time.time(), m["chain"])   # near-miss or ping -> second-leg watch
+                    if m["age_h"] >= OLD_MIN_AGE_H and m["chain"] == "solana":
+                        await loop.run_in_executor(None, old_coin_check, state, m)
                     reasons = runner_reasons(m)
                     if not reasons:
                         story = real_world_match(m)
