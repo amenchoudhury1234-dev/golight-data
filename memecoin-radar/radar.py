@@ -789,6 +789,7 @@ def serial_copies(m):
 _KIND_REC = {"t": 0.0, "rows": {}, "tiers": {}, "exits": {}}
 LATE_H1_CHANGE = 300             # a coin already up this much in the last hour is flagged LATE (and arrives quietly)
 LATE_VIP_H1 = 100                # VIP heads-ups are meant to be BEFORE the move - +100% in the hour already = late
+LATE_M5_CHANGE = 100             # a +100% 5-minute candle also means the move already happened (SLOPCORE 11:00)
 KIND_QUIET = (6, 0.20, 0.80)     # >= 6 settled pings, < 20% doubled, < 0.80 back -> silent "LOW RECORD"
 KIND_STAR = (6, 0.60, 1.20)      # >= 6 settled pings, >= 60% doubled, >= 1.20 back -> urgent "BEST TYPE"
 EXIT_LABEL = {"rules": "sell half at 2x, out at -30%", "wide": "sell half at 2x, out at -50%",
@@ -894,7 +895,55 @@ def tier_record(tier):
             f"{sum(x < 1.05 for x, _ in r)} never rose." if r else "")
 
 
+# ---- Cross-channel coherence (4 Oct, Elon "I love SI slopcore") ----
+# 10:58 the VIP heads-up named SLOPCORE at $774K (good: +78% an hour later); 11:00 a CATALYST ping repeated it at
+# $1.71M after a +123% 5-min jump (-20% since). 11:05 FAST LOTTO pinged "SI SLOP" (created AFTER the tweet), its 45s
+# read said FADING, then 33s later a CATALYST ping said "AI OK" - it went 3x and dumped to 0.48x. So: no main ping on a
+# coin the VIP heads-up already named (30 min) or the fast channel read as FADING (20 min); coins created after the
+# VIP post they're named after are tweet copies - fast channel only, with a warning; a +100% 5-min candle is LATE too.
+_RECENT_VIP_COINS = {}       # addr -> time the VIP heads-up named it
+_RECENT_FADING = {}          # addr -> time the 45s read said FADING
+VIP_DEDUPE_MIN, FADING_HOLD_MIN = 30, 20
+
+
+def created_after_vip(m):
+    """(account, minutes since post) if this coin was created after a recent VIP post whose phrases it is named
+    after - a 'tweet copy' - else None."""
+    now = time.time()
+    # the coin's own launch time when we saw it (a migrated coin's DexScreener age is its NEW pool's age)
+    age_s = now - MINT_META[m["addr"]][0] if m.get("addr") in MINT_META else m["age_h"] * 3600
+    for t, acct, text in reversed(RECENT_VIP):
+        if now - t > 2 * 3600 or acct in X_FEED_ACCOUNTS:
+            continue
+        if age_s >= now - t:
+            continue
+        if any(_theme_hits(ph, m["name"], m["symbol"]) for ph in vip_phrases(text)):
+            return acct, (now - t) / 60
+        # copies borrow fragments: "SI SLOP" from "I love SI slopcore" ("slop" is inside "slopcore")
+        import re
+        post_words = {w for w in re.findall(r"[a-z]{4,}", text.lower()) if w not in COMMON_WORDS and w not in STOP}
+        coin_words = {w for w in re.findall(r"[a-z]{4,}", f"{m['name']} {m['symbol']}".lower())
+                      if w not in COMMON_WORDS and w not in STOP}
+        if any(cw in pw or pw in cw for cw in coin_words for pw in post_words):
+            return acct, (now - t) / 60
+    return None
+
+
 def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
+    now = time.time()
+    if now - _RECENT_VIP_COINS.get(m["addr"], 0) < VIP_DEDUPE_MIN * 60:
+        log(f"held {kind} ${m['symbol']} - the VIP heads-up already named it")
+        log_candidate(kind, m, False, ["already named by VIP heads-up"], flags)
+        return
+    if now - _RECENT_FADING.get(m["addr"], 0) < FADING_HOLD_MIN * 60:
+        log(f"held {kind} ${m['symbol']} - fast channel read it as FADING")
+        log_candidate(kind, m, False, ["fast channel read FADING"], flags)
+        return
+    copy = created_after_vip(m)
+    if copy and kind not in ("SLEEPER WAKING",):
+        log(f"held {kind} ${m['symbol']} - tweet copy (created after @{copy[0]}'s post)")
+        log_candidate(kind, m, False, [f"tweet copy (after @{copy[0]} post)"], flags)
+        return
     reals = story_coin_symbols().get(m["symbol"].lstrip("$").upper()) or set()
     if reals and m["addr"] not in reals:
         real = ", ".join(sorted(a[:6] + "..." for a in reals))
@@ -996,11 +1045,11 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     if grade:
         title = ("BEST TYPE " if grade == "star" else "LOW RECORD ") + title
     # 4 Oct: CATALYST $SpaceXSI pinged at $1.16M already +1,729% in the hour, then fell ~20% - a late chase.
-    late = m["chg_h1"] >= LATE_H1_CHANGE and kind not in ("SLEEPER WAKING",)
+    late = (m["chg_h1"] >= LATE_H1_CHANGE or m["chg_m5"] >= LATE_M5_CHANGE) and kind not in ("SLEEPER WAKING",)
     if late:
         title = "LATE " + title
-        extra = (f"LATE: already up {m['chg_h1']:+.0f}% in the last hour - most of the move has probably happened; "
-                 "buying now is chasing.\n" + extra)
+        extra = (f"LATE: already up {m['chg_h1']:+.0f}% in the last hour ({m['chg_m5']:+.0f}% in 5 min) - most of the "
+                 "move has probably happened; buying now is chasing.\n" + extra)
     body = (
         kind_record(kind) + "\n"
         f"{m['name']} (${m['symbol']}) on {m['chain']}\n"
@@ -1931,6 +1980,8 @@ def _tier_read(mint, s):
             + (f", holders {(growth - 1) * 100:+.0f}%" if growth else "") + f", {linked} linked insider wallets.")
     sym = s.get("symbol", mint[:6])
     log(f"tier: ${sym} {tier} - mcap x{rise:.2f} in {TIER_AT_S}s, {linked} linked")
+    if tier == "FADING":
+        _RECENT_FADING[mint] = time.time()
     if mint not in EXITS:          # FALLING already went out: a label now would only be noise
         return
     EXITS[mint]["read"] = read
@@ -2303,6 +2354,10 @@ def fast_lotto_check(mint, first_mcap):
         warns.append(f"SERIAL DEV: {dev['dev_launches_24h']} launches in 24h (only ~6% of these double)")
     if avg_trade_now < 30:
         warns.append(f"TINY TRADES: ${avg_trade_now:.0f} average (bot volume - only ~5% of these double)")
+    copy = created_after_vip(m)
+    if copy:
+        warns.append(f"TWEET COPY: created {copy[1]:.0f} min after @{copy[0]}'s post it's named after - these spike "
+                     "and dump within minutes (SI SLOP: 3x in 9 min, then 0.5x). Take profit fast or skip")
     body = ("WATCH - wait ~45s for the read: BUY WINDOW (green) or FADING (red) before buying.\n"
             + kind_record("FAST LOTTO") + "\n"
             + "".join(f"WARNING {w}\n" for w in warns)
@@ -2874,6 +2929,8 @@ async def x_vip_loop(state):
                                          else "") + f' | CA {m["addr"]}'
                                       for ph, m in top)
                     all_late = all(m["chg_h1"] >= LATE_VIP_H1 for _, m in top)
+                    for _, m in top:
+                        _RECENT_VIP_COINS[m["addr"]] = time.time()
                     send_ntfy(("LATE? " if all_late else "") + f"@{name} just posted - matching coins",
                               f'"{text[:200]}"\n\nExisting coins that match:\n'
                               f"{lines}\n\nThe EARLIEST heads-up (JIMOTHY did +331% after Elon's raccoon post) - but "
