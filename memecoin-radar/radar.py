@@ -787,6 +787,8 @@ def serial_copies(m):
 # ping now carries its type's record, the best exit so far for its group, and types with a proven record get louder
 # (BEST TYPE, urgent) or silent (LOW RECORD) automatically.
 _KIND_REC = {"t": 0.0, "rows": {}, "tiers": {}, "exits": {}}
+LATE_H1_CHANGE = 300             # a coin already up this much in the last hour is flagged LATE (and arrives quietly)
+LATE_VIP_H1 = 100                # VIP heads-ups are meant to be BEFORE the move - +100% in the hour already = late
 KIND_QUIET = (6, 0.20, 0.80)     # >= 6 settled pings, < 20% doubled, < 0.80 back -> silent "LOW RECORD"
 KIND_STAR = (6, 0.60, 1.20)      # >= 6 settled pings, >= 60% doubled, >= 1.20 back -> urgent "BEST TYPE"
 EXIT_LABEL = {"rules": "sell half at 2x, out at -30%", "wide": "sell half at 2x, out at -50%",
@@ -993,6 +995,12 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
     grade = kind_grade(kind)
     if grade:
         title = ("BEST TYPE " if grade == "star" else "LOW RECORD ") + title
+    # 4 Oct: CATALYST $SpaceXSI pinged at $1.16M already +1,729% in the hour, then fell ~20% - a late chase.
+    late = m["chg_h1"] >= LATE_H1_CHANGE and kind not in ("SLEEPER WAKING",)
+    if late:
+        title = "LATE " + title
+        extra = (f"LATE: already up {m['chg_h1']:+.0f}% in the last hour - most of the move has probably happened; "
+                 "buying now is chasing.\n" + extra)
     body = (
         kind_record(kind) + "\n"
         f"{m['name']} (${m['symbol']}) on {m['chain']}\n"
@@ -1004,7 +1012,7 @@ def alert(state, kind, m, extra="", skip_dedupe=False, flags=None):
         + exit_advice("main") + " Size it to the TRACK RECORD line. Add it to positions.txt for exit alerts."
     )
     if send_ntfy(title, body, click=coinbase_url(m),
-                 priority="urgent" if (strong or grade == "star") else "low" if grade == "low" else "high",
+                 priority=("low" if late or grade == "low" else "urgent" if (strong or grade == "star") else "high"),
                  tags="rotating_light,moneybag" if strong else "rotating_light", actions=check_links(m)):
         state.record(m["addr"], m["mcap"])
         try:   # tell the cloud Catalyst routine we pinged this coin, so it doesn't re-alert it as "new"
@@ -2815,14 +2823,21 @@ async def x_vip_loop(state):
                         log(f"VIP match skipped by AI: ${m['symbol']} ('{ph}') - {v['reason']}")
                 top = judged
                 if top:
+                    # 4 Oct: Elon's "SpaceX is a super intelligence company" ping listed $SI already +152% in the
+                    # hour - a heads-up on a coin that has already run is a late chase, so say so per coin.
                     lines = "\n".join(f'- "{ph}" -> {m["name"]} ${m["symbol"]} {fmt_usd(m["mcap"])} | vol 24h '
-                                      f'{fmt_usd(m["vol_h24"])} | 1h {m["chg_h1"]:+.0f}% | CA {m["addr"]}'
+                                      f'{fmt_usd(m["vol_h24"])} | 1h {m["chg_h1"]:+.0f}%'
+                                      + (" | LATE: already ran - most of the move may be done" if m["chg_h1"] >= LATE_VIP_H1
+                                         else "") + f' | CA {m["addr"]}'
                                       for ph, m in top)
-                    send_ntfy(f"@{name} just posted - matching coins", f'"{text[:200]}"\n\nExisting coins that match:\n'
-                              f"{lines}\n\nThese haven't necessarily moved yet - this is the EARLIEST possible heads-up "
-                              "(JIMOTHY did +331% after Elon's raccoon post). Only buy if volume starts jumping in the next "
-                              "few minutes - no buyers = no move. Check GMGN, GBP20-50 max, half out at 2x.",
-                              click=coinbase_url(top[0][1]), priority="urgent" if name in X_FAST_ACCOUNTS else "high",
+                    all_late = all(m["chg_h1"] >= LATE_VIP_H1 for _, m in top)
+                    send_ntfy(("LATE? " if all_late else "") + f"@{name} just posted - matching coins",
+                              f'"{text[:200]}"\n\nExisting coins that match:\n'
+                              f"{lines}\n\nThe EARLIEST heads-up (JIMOTHY did +331% after Elon's raccoon post) - but "
+                              "a coin marked LATE has already moved; buying it now is chasing. Only buy if volume starts "
+                              "jumping in the next few minutes - no buyers = no move. Small size, half out at 2x.",
+                              click=coinbase_url(top[0][1]),
+                              priority="high" if all_late else ("urgent" if name in X_FAST_ACCOUNTS else "high"),
                               tags="bird", actions=check_links(top[0][1]))
             await asyncio.sleep(0.2)
         await asyncio.sleep(1)
