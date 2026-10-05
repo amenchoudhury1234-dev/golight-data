@@ -20,6 +20,8 @@
 
 const fs = require('fs');
 const path = require('path');
+
+const { declination } = require('./wmm');
 const { execSync } = require('child_process');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
@@ -359,48 +361,61 @@ function bearingBetween(lat1, lon1, lat2, lon2) {
   return ((Math.atan2(y, x) / r) + 360) % 360;
 }
 
+// Runway numbers are the MAGNETIC direction rounded to 10 deg, and a runway
+// is only renumbered once the magnetic direction has drifted a few degrees
+// past that - so a number can be ~8 deg off. Converted to true with the
+// official World Magnetic Model (scripts/wmm.js); the app then assumes the
+// WORST crosswind anywhere within +/- this range.
+const RUNWAY_NUMBER_UNCERTAINTY = 8;
+
+const runwayNumber = (id) => {
+  const m = (id || '').match(/^(\d{1,2})[LRCG]?$/);
+  return m && Number(m[1]) >= 1 && Number(m[1]) <= 36 ? Number(m[1]) : null;
+};
+const norm360 = (d) => Math.round((((d % 360) + 360) % 360) * 10) / 10;
+
 // A runway's ends with TRUE bearings, best source first:
 //  1. the published true heading;
 //  2. computed from the two runway-end coordinates (exact);
-//  3. UK only: the runway number x10 (magnetic). The number is the magnetic
-//     heading rounded to 10 deg (up to 5 deg off) and UK variation is ~0-2
-//     deg, so this is within ~8 deg of true - marked uncertaintyDeg: 8 and the
-//     app assumes the WORST crosswind inside that range. Not used for the US,
-//     where variation reaches ~16 deg.
-function runwayEnds(r, ukStyle) {
+//  3. the runway number x10 (magnetic) + magnetic variation, approximate.
+// A published "true heading" that is exactly the runway number x10 is often
+// the magnetic number copied in: it could be either, so the range covers
+// both (centred between them, widened by half the variation).
+function runwayEnds(r, airport) {
+  const variation = declination(airport.lat, airport.lon);
   const le = r.le_heading_degT === '' ? NaN : Number(r.le_heading_degT);
   const he = r.he_heading_degT === '' ? NaN : Number(r.he_heading_degT);
   const ends = [];
-  // A "true heading" that is exactly the runway number x10 is almost always
-  // the MAGNETIC number copied in, not a surveyed true bearing - treat it as
-  // approximate: 5 deg of rounding plus variation (UK ~2, US up to ~16).
-  const copied = (id, h) => {
-    const m = (id || '').match(/^(\d{1,2})[LRCG]?$/);
-    return m ? Math.abs(Number(m[1]) * 10 - h) < 0.5 || Math.abs(Number(m[1]) * 10 - h - 360) < 0.5 : false;
-  };
-  const approx = ukStyle ? 8 : 20;
   for (const [id, h] of [[r.le_ident, le], [r.he_ident, he]]) {
     if (!id || !Number.isFinite(h)) continue;
-    ends.push(copied(id, h) ? { id, trueBearing: round(h, 1), uncertaintyDeg: approx } : { id, trueBearing: round(h, 1) });
+    const num = runwayNumber(id);
+    const copied = num !== null && Math.abs(((num * 10 - h + 540) % 360) - 180) < 0.5;
+    ends.push(
+      copied
+        ? {
+            id,
+            trueBearing: norm360(h + variation / 2),
+            uncertaintyDeg: Math.ceil(Math.abs(variation) / 2 + RUNWAY_NUMBER_UNCERTAINTY),
+          }
+        : { id, trueBearing: norm360(h) },
+    );
   }
   if (ends.length) return ends;
   const c = [r.le_latitude_deg, r.le_longitude_deg, r.he_latitude_deg, r.he_longitude_deg].map((v) => (v === '' ? NaN : Number(v)));
   if (c.every(Number.isFinite) && (c[0] !== c[2] || c[1] !== c[3])) {
     const b = bearingBetween(c[0], c[1], c[2], c[3]);
-    if (r.le_ident) ends.push({ id: r.le_ident, trueBearing: round(b, 1) });
-    if (r.he_ident) ends.push({ id: r.he_ident, trueBearing: round((b + 180) % 360, 1) });
+    if (r.le_ident) ends.push({ id: r.le_ident, trueBearing: norm360(b) });
+    if (r.he_ident) ends.push({ id: r.he_ident, trueBearing: norm360(b + 180) });
     return ends;
   }
-  if (!ukStyle) return [];
   for (const id of [r.le_ident, r.he_ident]) {
-    const m = (id || '').match(/^(\d{1,2})[LRCG]?$/);
-    if (m && Number(m[1]) >= 1 && Number(m[1]) <= 36) ends.push({ id, trueBearing: Number(m[1]) * 10, uncertaintyDeg: 8 });
+    const num = runwayNumber(id);
+    if (num !== null) ends.push({ id, trueBearing: norm360(num * 10 + variation), uncertaintyDeg: RUNWAY_NUMBER_UNCERTAINTY });
   }
   return ends;
 }
 
 async function buildCommunity(official, countries) {
-  const ukStyle = countries.includes('GB');
   const [airportsCsv, runwaysCsv, freqCsv] = await Promise.all(
     ['airports.csv', 'runways.csv', 'airport-frequencies.csv'].map(async (f) => (await fetchOk(`${OA_BASE}/${f}`)).text()),
   );
@@ -431,7 +446,7 @@ async function buildCommunity(official, countries) {
     if (!ap || r.closed === '1') continue;
     // Helipads and water lanes aren't runways for this purpose.
     if (/^H\d*$/i.test(r.le_ident || '') || /WATER/i.test(r.surface || '')) continue;
-    const ends = runwayEnds(r, ukStyle);
+    const ends = runwayEnds(r, ap);
     if (ends.length === 0) continue; // no usable direction - the app checks the total wind instead
     ap.runways.push({
       id: [r.le_ident, r.he_ident].filter(Boolean).join('/'),

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-05T10:26:43.590Z",
+  "generatedAt": "2026-10-05T10:44:26.451Z",
   "counts": {
     "ukAirports": 155,
     "vrps": 404,
@@ -7,7 +7,7 @@
     "usAirports": 1764,
     "usAirfields": 22566,
     "ukAerodromes": 302,
-    "usAerodromes": 5777
+    "usAerodromes": 12504
   },
   "sources": {
     "airports": "https://davidmegginson.github.io/ourairports-data/airports.csv",

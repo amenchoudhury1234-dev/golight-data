@@ -18,6 +18,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Check the magnetic model against NOAA's test values
+        run: node scripts/test-wmm.js
       - name: Build data
         run: node scripts/build-data.js
       - name: Commit if changed
