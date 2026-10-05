@@ -19,6 +19,7 @@ const FLOORS = {
   'us-airfields.json': 18000,
   'uk-aerodromes.json': 250,
   'us-aerodromes.json': 10000,
+  'uk-fixes.json': 900,
 };
 for (const [f, min] of Object.entries(FLOORS)) {
   const n = read(f).length;
@@ -30,6 +31,17 @@ for (const f of ['uk-airports.json', 'uk-vrps.json', 'uk-airfields.json', 'us-ai
   read(f).forEach((p, i) => {
     if (!finite(p.lat) || !finite(p.lon) || Math.abs(p.lat) > 90 || Math.abs(p.lon) > 180) fail(`${f}[${i}] bad position`);
   });
+}
+
+{
+  const seen = new Set();
+  for (const p of read('uk-fixes.json')) {
+    if (!finite(p.lat) || !finite(p.lon) || p.lat < 44 || p.lat > 62 || p.lon < -16 || p.lon > 6) fail(`uk-fixes ${p.ident}: position outside the UK FIRs (incl. Shanwick boundary)`);
+    if (!/^[A-Z0-9]{2,5}$/.test(p.ident)) fail(`uk-fixes: ident "${p.ident}"`);
+    if (p.kind !== 'fix' && p.kind !== 'navaid') fail(`uk-fixes ${p.ident}: kind ${p.kind}`);
+    if (seen.has(p.ident)) fail(`uk-fixes: duplicate ${p.ident}`);
+    seen.add(p.ident);
+  }
 }
 
 for (const f of ['uk-aerodromes.json', 'us-aerodromes.json']) {

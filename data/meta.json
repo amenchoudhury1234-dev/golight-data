@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-05T10:49:40.198Z",
+  "generatedAt": "2026-10-05T13:08:19.010Z",
   "counts": {
     "ukAirports": 155,
     "vrps": 404,
@@ -7,7 +7,8 @@
     "usAirports": 1764,
     "usAirfields": 22566,
     "ukAerodromes": 301,
-    "usAerodromes": 12497
+    "usAerodromes": 12497,
+    "ukFixes": 1177
   },
   "sources": {
     "airports": "https://davidmegginson.github.io/ourairports-data/airports.csv",
@@ -16,6 +17,7 @@
     "usAirfields": "https://davidmegginson.github.io/ourairports-data/airports.csv",
     "ukAerodromes": "https://nats-uk.ead-it.com/cms-nats/export/sites/default/en/Publications/digital-datasets/ICAO_AIP/EG_AIP_DS_20261001_XML.zip",
     "usAerodromes": "https://nfdc.faa.gov/webContent/28DaySub/extra/01_Oct_2026_APT_CSV.zip",
+    "ukFixes": "https://nats-uk.ead-it.com/cms-nats/export/sites/default/en/Publications/digital-datasets/ICAO_AIP/EG_AIP_DS_20261001_XML.zip",
     "communityAerodromes": "https://davidmegginson.github.io/ourairports-data/runways.csv (public domain; only where no official entry exists, marked source: community)"
   },
   "notes": {

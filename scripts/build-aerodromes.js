@@ -171,7 +171,61 @@ async function buildUk() {
     .filter((a) => a.runways.length > 0)
     .map((a) => ({ ...a, runways: a.runways.filter((r) => r.ends.length > 0) }))
     .sort((a, b) => a.icao.localeCompare(b.icao));
-  return { aerodromes: out, sourceUrl: `https://nats-uk.ead-it.com${zipUrl}` };
+  return { aerodromes: out, fixes: buildUkFixes(xml), sourceUrl: `https://nats-uk.ead-it.com${zipUrl}` };
+}
+
+// IFR waypoints and radio navaids, so pilots can route via e.g. BADIM or the
+// Cardiff NDB (CDF). Named 5-letter designated points (type ICAO) only - the
+// AIP's coordinate-only procedure points (VPxxx) aren't route points pilots
+// type. Navaids: VOR, VOR/DME, VORTAC, NDB and en-route DMEs; ILS/localiser
+// aids and ILS DMEs (purpose TERMINAL) are approach aids, not waypoints.
+const NAVAID_KIND = {
+  VOR: 'VOR',
+  VOR_DME: 'VOR/DME',
+  VORTAC: 'VORTAC',
+  TACAN: 'TACAN',
+  NDB: 'NDB',
+  NDB_DME: 'NDB/DME',
+  DME: 'DME',
+};
+const NAVAID_PREFERENCE = ['VOR/DME', 'VORTAC', 'VOR', 'NDB/DME', 'NDB', 'TACAN', 'DME'];
+
+function pointOf(b) {
+  const pos = b.match(/<gml:pos[^>]*>([-\d.]+)\s+([-\d.]+)</);
+  if (!pos) return null;
+  const lat = Number(pos[1]);
+  const lon = Number(pos[2]);
+  return Number.isFinite(lat) && Number.isFinite(lon) ? { lat: round(lat, 5), lon: round(lon, 5) } : null;
+}
+
+// Withdrawn features carry an end date on their lifetime.
+const withdrawn = (b) => {
+  const m = b.match(/<aixm:featureLifetime[\s\S]*?<gml:endPosition>([^<]+)</);
+  return !!m && m[1] <= new Date().toISOString();
+};
+
+function buildUkFixes(xml) {
+  const out = [];
+  for (const b of blocks(xml, 'DesignatedPoint')) {
+    const ident = field(b, 'designator');
+    const pt = pointOf(b);
+    if (field(b, 'type') !== 'ICAO' || !ident || !/^[A-Z]{5}$/.test(ident) || !pt || withdrawn(b)) continue;
+    out.push({ kind: 'fix', ident, name: null, lat: pt.lat, lon: pt.lon });
+  }
+  const navaids = new Map();
+  for (const b of blocks(xml, 'Navaid')) {
+    const kind = NAVAID_KIND[field(b, 'type')];
+    const ident = field(b, 'designator');
+    const pt = pointOf(b);
+    if (!kind || !ident || !pt || withdrawn(b)) continue;
+    if (kind === 'DME' && field(b, 'purpose') === 'TERMINAL') continue; // ILS DMEs
+    const name = (field(b, 'name') || '').trim() || null;
+    const prev = navaids.get(ident);
+    // A VOR and its co-located DME share an ident - keep the more useful one.
+    if (prev && NAVAID_PREFERENCE.indexOf(prev.type) <= NAVAID_PREFERENCE.indexOf(kind)) continue;
+    navaids.set(ident, { kind: 'navaid', ident, name: name ?? prev?.name ?? null, type: kind, lat: pt.lat, lon: pt.lon });
+  }
+  return [...out, ...navaids.values()].sort((a, b) => a.ident.localeCompare(b.ident));
 }
 
 // ---------------------------------------------------------------------------
@@ -545,12 +599,19 @@ async function buildAerodromes() {
   uk.aerodromes = [...cleanRunways(uk.aerodromes), ...ukCommunity];
   us.aerodromes = [...cleanRunways(us.aerodromes), ...usCommunity];
   fs.writeFileSync(path.join(DATA_DIR, 'uk-aerodromes.json'), JSON.stringify(uk.aerodromes));
+  fs.writeFileSync(path.join(DATA_DIR, 'uk-fixes.json'), JSON.stringify(uk.fixes));
   fs.writeFileSync(path.join(DATA_DIR, 'us-aerodromes.json'), JSON.stringify(us.aerodromes));
   fs.rmSync(TMP_DIR, { recursive: true, force: true });
   console.log(
-    `UK aerodromes: ${uk.aerodromes.length} (${ukCommunity.length} community), US aerodromes: ${us.aerodromes.length} (${usCommunity.length} community)`,
+    `UK aerodromes: ${uk.aerodromes.length} (${ukCommunity.length} community), UK IFR waypoints/navaids: ${uk.fixes.length}, US aerodromes: ${us.aerodromes.length} (${usCommunity.length} community)`,
   );
-  return { ukCount: uk.aerodromes.length, usCount: us.aerodromes.length, ukSource: uk.sourceUrl, usSource: us.sourceUrl };
+  return {
+    ukCount: uk.aerodromes.length,
+    usCount: us.aerodromes.length,
+    ukFixCount: uk.fixes.length,
+    ukSource: uk.sourceUrl,
+    usSource: us.sourceUrl,
+  };
 }
 
 module.exports = { buildAerodromes };

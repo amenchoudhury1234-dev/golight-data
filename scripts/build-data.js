@@ -234,6 +234,7 @@ async function main() {
           usAirfields: usAirfields.length,
           ukAerodromes: aerodromes.ukCount,
           usAerodromes: aerodromes.usCount,
+          ukFixes: aerodromes.ukFixCount,
         },
         sources: {
           airports: 'https://davidmegginson.github.io/ourairports-data/airports.csv',
@@ -242,6 +243,7 @@ async function main() {
           usAirfields: 'https://davidmegginson.github.io/ourairports-data/airports.csv',
           ukAerodromes: aerodromes.ukSource,
           usAerodromes: aerodromes.usSource,
+          ukFixes: aerodromes.ukSource,
           communityAerodromes:
             'https://davidmegginson.github.io/ourairports-data/runways.csv (public domain; only where no official entry exists, marked source: community)',
         },
