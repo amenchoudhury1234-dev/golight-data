@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>You're invited to Minima</title>
+<meta name="description" content="A pilot invited you to Minima - free go/no-go weather checks before you fly.">
+<meta name="robots" content="noindex">
+<style>
+  :root {
+    --bg: #eef4fb; --card: #ffffff; --text: #10233d; --muted: #5b6b80;
+    --accent: #2f7de1; --on-accent: #ffffff; --border: #d8e3f0; --go: #2fa36b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0b1626; --card: #13233a; --text: #eaf2ff; --muted: #9db0c8; --accent: #5aa0ff; --on-accent: #06172d; --border: #233a58; --go: #45c487; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 16px/1.45 ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  }
+  .card {
+    width: 100%; max-width: 400px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 32px; padding: 32px 24px; text-align: center;
+    display: flex; flex-direction: column; gap: 16px; align-items: center;
+    box-shadow: 0 12px 40px rgba(16, 35, 61, 0.08);
+  }
+  .bubble {
+    width: 76px; height: 76px; border-radius: 50%; background: var(--bg);
+    display: flex; align-items: center; justify-content: center; font-size: 36px;
+  }
+  h1 { margin: 0; font-size: 26px; line-height: 1.2; text-wrap: balance; }
+  p { margin: 0; color: var(--muted); }
+  .btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%;
+    min-height: 54px; border-radius: 999px; border: 0; cursor: pointer;
+    background: var(--accent); color: var(--on-accent); font: inherit; font-weight: 700; font-size: 17px;
+    text-decoration: none; transition: transform .12s ease;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:focus-visible, .link:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  .link { color: var(--accent); font-weight: 600; text-decoration: none; font-size: 15px; }
+  .code {
+    font: 600 15px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 3px;
+    background: var(--bg); border-radius: 999px; padding: 6px 14px; color: var(--text);
+  }
+  .small { font-size: 13px; }
+  .ok { color: var(--go); font-weight: 600; font-size: 14px; min-height: 1.4em; }
+  @media (prefers-reduced-motion: reduce) { .btn { transition: none; } }
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="bubble" aria-hidden="true">✈️</div>
+    <h1>A pilot invited you to Minima</h1>
+    <p>Free go/no-go weather checks for your route - one answer before you fly.</p>
+    <a id="get" class="btn" href="https://apps.apple.com/app/id6810462804">Get Minima - free</a>
+    <div id="ok" class="ok" role="status"></div>
+    <p class="small" id="how">Then open Minima and tap <b>Paste</b> on "Invited by a pilot?"</p>
+    <a id="open" class="link" href="#">Already have Minima? Open your invite</a>
+    <p class="small">Invite code <span id="code" class="code">-</span></p>
+  </main>
+<script>
+  // The invite code rides in the #fragment, so it never reaches a server.
+  var ALPHABET = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/;
+  var APP_STORE = 'https://apps.apple.com/app/id6810462804';
+  var PLAY_STORE = 'https://play.google.com/store/apps/details?id=com.vend2go.minima';
+  var PLAY_LIVE = false; // Android is in closed testing until launch
+
+  var raw = (location.hash || '').replace('#', '').toUpperCase();
+  var code = ALPHABET.test(raw) ? raw : null;
+  var android = /android/i.test(navigator.userAgent);
+
+  var get = document.getElementById('get');
+  var ok = document.getElementById('ok');
+  var how = document.getElementById('how');
+  var open = document.getElementById('open');
+  document.getElementById('code').textContent = code || '-';
+
+  if (!code) {
+    open.style.display = 'none';
+    how.textContent = 'Search "Minima Pilot" if the button doesn’t open your store.';
+  } else {
+    open.href = 'minima://invite/' + code;
+  }
+
+  if (android) {
+    if (PLAY_LIVE) {
+      // Google Play hands this to the app on first launch: nothing to paste.
+      get.href = PLAY_STORE + (code ? '&referrer=' + encodeURIComponent('minima_invite=' + code) : '');
+      get.textContent = 'Get Minima on Google Play';
+      how.textContent = 'Your invite is applied automatically when you open Minima.';
+    } else {
+      get.textContent = 'Android version coming soon';
+      get.removeAttribute('href');
+      get.setAttribute('aria-disabled', 'true');
+      get.style.opacity = '0.6';
+      how.textContent = 'Minima is on iPhone now. Keep this link - your invite will still work.';
+    }
+  } else if (code) {
+    // Copy the invite as they leave for the App Store, so in the app it's a
+    // single Paste tap - nothing to type.
+    get.addEventListener('click', function (e) {
+      e.preventDefault();
+      var go = function () { location.href = APP_STORE; };
+      var text = 'Minima invite code: ' + code;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () {
+          ok.textContent = 'Invite copied ✓';
+          setTimeout(go, 600);
+        }, go);
+      } else {
+        go();
+      }
+    });
+  }
+</script>
+</body>
+</html>
