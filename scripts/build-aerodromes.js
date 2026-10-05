@@ -128,7 +128,10 @@ async function buildUk() {
   }
   for (const b of blocks(xml, 'RunwayDirection')) {
     const rwy = runways.get(href(b, 'usedRunway'));
-    const bearing = Number(field(b, 'trueBearing'));
+    // A missing bearing must be SKIPPED, not read as 0 deg: Number('') is 0,
+    // which gave EGBM/EGNL runways a bearing of 000 and nonsense components.
+    const raw = field(b, 'trueBearing');
+    const bearing = raw ? Number(raw) : NaN;
     if (!rwy || !Number.isFinite(bearing)) continue;
     rwy.ends.push({ id: field(b, 'designator'), trueBearing: round(bearing, 1) });
   }
@@ -275,8 +278,8 @@ async function buildUs() {
   }
   for (const r of read('APT_RWY_END.csv')) {
     const rwy = rwys.get(rwyKey(r));
-    const bearing = Number(r.TRUE_ALIGNMENT);
-    if (!rwy || r.TRUE_ALIGNMENT === '' || !Number.isFinite(bearing)) continue;
+    const bearing = r.TRUE_ALIGNMENT === '' ? NaN : Number(r.TRUE_ALIGNMENT);
+    if (!rwy || !Number.isFinite(bearing)) continue;
     rwy.ends.push({ id: r.RWY_END_ID, trueBearing: bearing });
   }
   for (const r of read('FRQ.csv')) {
@@ -299,10 +302,37 @@ async function buildUs() {
   return { aerodromes: out, sourceUrl: `${NASR_BASE}/${cycle}_APT_CSV.zip` };
 }
 
+// Make each runway usable for wind maths, or drop it:
+//  - closed ("X" in the designator) or zero-length entries go;
+//  - a runway listed with only ONE end gets the opposite end (+180 deg) so
+//    it isn't treated as one-way (which would invent tailwinds);
+//  - a runway with no known bearing at all goes (the app then checks the
+//    total wind for that airfield rather than guess a direction).
+function cleanRunways(list) {
+  return list
+    .map((a) => ({
+      ...a,
+      runways: a.runways
+        .filter((r) => r.lengthM && r.lengthM > 0 && !/X/i.test(r.id))
+        .map((r) => {
+          if (r.ends.length !== 1) return r;
+          const [only] = r.ends;
+          const ids = r.id.split('/');
+          const otherId = ids.find((x) => x !== only.id);
+          if (!otherId) return r;
+          return { ...r, ends: [only, { id: otherId, trueBearing: Math.round(((only.trueBearing + 180) % 360) * 10) / 10 }] };
+        })
+        .filter((r) => r.ends.length > 0),
+    }))
+    .filter((a) => a.runways.length > 0);
+}
+
 async function buildAerodromes() {
   const uk = await buildUk();
   const us = await buildUs();
   fs.mkdirSync(DATA_DIR, { recursive: true });
+  uk.aerodromes = cleanRunways(uk.aerodromes);
+  us.aerodromes = cleanRunways(us.aerodromes);
   fs.writeFileSync(path.join(DATA_DIR, 'uk-aerodromes.json'), JSON.stringify(uk.aerodromes));
   fs.writeFileSync(path.join(DATA_DIR, 'us-aerodromes.json'), JSON.stringify(us.aerodromes));
   fs.rmSync(TMP_DIR, { recursive: true, force: true });
