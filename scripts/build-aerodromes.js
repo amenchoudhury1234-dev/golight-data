@@ -374,6 +374,17 @@ const runwayNumber = (id) => {
 };
 const norm360 = (d) => Math.round((((d % 360) + 360) % 360) * 10) / 10;
 
+const angleDiff = (a, b) => Math.abs(((a - b + 540) % 360) - 180);
+
+// Community data has typos (e.g. one end 064, the other 209). A direction is
+// only used if it's consistent: the two ends opposite (within 10 deg), and
+// each end within 20 deg of what its runway number implies (number x10 +
+// variation, allowing for rounding and drift). Anything else falls through
+// to the next source, or the runway is dropped (the app then checks the
+// total wind) - never a guess.
+const OPPOSITE_TOLERANCE = 10;
+const NUMBER_TOLERANCE = 20;
+
 // A runway's ends with TRUE bearings, best source first:
 //  1. the published true heading;
 //  2. computed from the two runway-end coordinates (exact);
@@ -383,14 +394,28 @@ const norm360 = (d) => Math.round((((d % 360) + 360) % 360) * 10) / 10;
 // both (centred between them, widened by half the variation).
 function runwayEnds(r, airport) {
   const variation = declination(airport.lat, airport.lon);
-  const le = r.le_heading_degT === '' ? NaN : Number(r.le_heading_degT);
-  const he = r.he_heading_degT === '' ? NaN : Number(r.he_heading_degT);
-  const ends = [];
-  for (const [id, h] of [[r.le_ident, le], [r.he_ident, he]]) {
-    if (!id || !Number.isFinite(h)) continue;
-    const num = runwayNumber(id);
-    const copied = num !== null && Math.abs(((num * 10 - h + 540) % 360) - 180) < 0.5;
-    ends.push(
+  const ids = [r.le_ident, r.he_ident];
+  const nums = ids.map(runwayNumber);
+  // Designators that contradict each other ("18/28") can't be trusted for
+  // direction at all.
+  if (nums[0] !== null && nums[1] !== null && Math.abs(nums[0] - nums[1]) !== 18) return [];
+  const fitsNumber = (id, trueBearing) => {
+    const n = runwayNumber(id);
+    return n === null || angleDiff(trueBearing, n * 10 + variation) <= NUMBER_TOLERANCE;
+  };
+  const consistent = (ends) =>
+    ends.length > 0 &&
+    ends.every((e) => fitsNumber(e.id, e.trueBearing)) &&
+    (ends.length < 2 || angleDiff(ends[0].trueBearing, ends[1].trueBearing) >= 180 - OPPOSITE_TOLERANCE);
+
+  const headings = [r.le_heading_degT, r.he_heading_degT].map((v) => (v === '' ? NaN : Number(v)));
+  const fromHeadings = [];
+  ids.forEach((id, i) => {
+    const h = headings[i];
+    if (!id || !Number.isFinite(h)) return;
+    const num = nums[i];
+    const copied = num !== null && angleDiff(num * 10, h) < 0.5;
+    fromHeadings.push(
       copied
         ? {
             id,
@@ -399,20 +424,23 @@ function runwayEnds(r, airport) {
           }
         : { id, trueBearing: norm360(h) },
     );
-  }
-  if (ends.length) return ends;
+  });
+  if (consistent(fromHeadings)) return fromHeadings;
+
   const c = [r.le_latitude_deg, r.le_longitude_deg, r.he_latitude_deg, r.he_longitude_deg].map((v) => (v === '' ? NaN : Number(v)));
   if (c.every(Number.isFinite) && (c[0] !== c[2] || c[1] !== c[3])) {
     const b = bearingBetween(c[0], c[1], c[2], c[3]);
-    if (r.le_ident) ends.push({ id: r.le_ident, trueBearing: norm360(b) });
-    if (r.he_ident) ends.push({ id: r.he_ident, trueBearing: norm360(b + 180) });
-    return ends;
+    const fromCoords = [];
+    if (r.le_ident) fromCoords.push({ id: r.le_ident, trueBearing: norm360(b) });
+    if (r.he_ident) fromCoords.push({ id: r.he_ident, trueBearing: norm360(b + 180) });
+    if (consistent(fromCoords)) return fromCoords;
   }
-  for (const id of [r.le_ident, r.he_ident]) {
-    const num = runwayNumber(id);
-    if (num !== null) ends.push({ id, trueBearing: norm360(num * 10 + variation), uncertaintyDeg: RUNWAY_NUMBER_UNCERTAINTY });
-  }
-  return ends;
+
+  const fromNumbers = [];
+  ids.forEach((id, i) => {
+    if (nums[i] !== null) fromNumbers.push({ id, trueBearing: norm360(nums[i] * 10 + variation), uncertaintyDeg: RUNWAY_NUMBER_UNCERTAINTY });
+  });
+  return fromNumbers;
 }
 
 async function buildCommunity(official, countries) {

@@ -22,6 +22,8 @@ jobs:
         run: node scripts/test-wmm.js
       - name: Build data
         run: node scripts/build-data.js
+      - name: Validate before publishing (the app reads this live)
+        run: node scripts/validate-data.js
       - name: Commit if changed
         run: |
           git config user.name "github-actions[bot]"
