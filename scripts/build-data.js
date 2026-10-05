@@ -16,6 +16,8 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
+const { buildAerodromes } = require('./build-aerodromes');
+
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const TMP_DIR = path.join(__dirname, '..', '.tmp');
 
@@ -210,6 +212,8 @@ async function main() {
   const usAirports = buildAirports(lines, idx, ['US']);
   const usAirfields = buildUsAirfields(lines, idx);
   const { vrps, airfields: ukAirfields, vrpSourceUrl, aeroSourceUrl } = await buildVrpsAndAirfields();
+  // Runways, elevation and frequencies from the official NATS AIP and FAA NASR datasets.
+  const aerodromes = await buildAerodromes();
 
   fs.writeFileSync(path.join(DATA_DIR, 'uk-airports.json'), JSON.stringify(ukAirports));
   fs.writeFileSync(path.join(DATA_DIR, 'uk-vrps.json'), JSON.stringify(vrps));
@@ -227,12 +231,16 @@ async function main() {
           ukAirfields: ukAirfields.length,
           usAirports: usAirports.length,
           usAirfields: usAirfields.length,
+          ukAerodromes: aerodromes.ukCount,
+          usAerodromes: aerodromes.usCount,
         },
         sources: {
           airports: 'https://davidmegginson.github.io/ourairports-data/airports.csv',
           vrps: `https://nats-uk.ead-it.com${vrpSourceUrl}`,
           ukAirfields: `https://nats-uk.ead-it.com${aeroSourceUrl}`,
           usAirfields: 'https://davidmegginson.github.io/ourairports-data/airports.csv',
+          ukAerodromes: aerodromes.ukSource,
+          usAerodromes: aerodromes.usSource,
         },
         notes: {
           usVrps:

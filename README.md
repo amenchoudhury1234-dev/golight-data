@@ -11,6 +11,8 @@ A GitHub Action re-runs `scripts/build-data.js` weekly (matching the ~28-day AIR
 - `data/uk-airfields.json` — Small unlicensed/uncertificated airfields and heliports (e.g. farm strips), from NATS AIS.
 - `data/us-airports.json` — US airports with a valid ICAO code, from OurAirports.com (public domain).
 - `data/us-airfields.json` — US small_airport/heliport records with no 4-letter ICAO code (private strips, small fields), from OurAirports.com. This is the closest open equivalent to `uk-airfields.json`; there is no US body publishing a curated aerosite list the way NATS does.
+- `data/uk-aerodromes.json` — UK aerodrome detail (runways with true bearings, length, width, surface; field elevation; ATC/ATIS/AFIS/A-G frequencies) from the **official NATS UK ICAO AIP Dataset** (AIXM 5.1), latest effective AIRAC cycle. Built by `scripts/build-aerodromes.js`.
+- `data/us-aerodromes.json` — the same for US public-use airports with an ICAO code, from the **official FAA NASR 28-day subscription** (APT/FRQ CSVs, public domain).
 - `data/meta.json` — When this was last generated, record counts, and the exact source URLs used.
 
 ## Known gap: no US VRPs
@@ -19,7 +21,7 @@ NATS' Visual Reference Points are a UK/NATS-specific product (named local landma
 
 ## Licensing note
 
-NATS AIS data (`uk-vrps.json`, `uk-airfields.json`) is published with "unrestricted access" but marked **"not for resale"** and **"for aviation use only."** This is fine for Minima's aviation-reference use case, but the commercial terms for a paid subscription app haven't been confirmed with NATS yet — see Minima's plan doc legal checklist. Contact: vfrcharts@nats.co.uk.
+NATS AIS data (`uk-vrps.json`, `uk-airfields.json`, `uk-aerodromes.json`) is published with "unrestricted access" but marked **"not for resale"** and **"for aviation use only."** This is fine for Minima's aviation-reference use case, but the commercial terms for a paid subscription app haven't been confirmed with NATS yet — see Minima's plan doc legal checklist. Contact: vfrcharts@nats.co.uk.
 
 `uk-airports.json`/`us-airports.json`/`us-airfields.json` (OurAirports.com) are public domain with no such restriction.
 
