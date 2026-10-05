@@ -212,7 +212,8 @@ async function main() {
   const usAirports = buildAirports(lines, idx, ['US']);
   const usAirfields = buildUsAirfields(lines, idx);
   const { vrps, airfields: ukAirfields, vrpSourceUrl, aeroSourceUrl } = await buildVrpsAndAirfields();
-  // Runways, elevation and frequencies from the official NATS AIP and FAA NASR datasets.
+  // Runways, elevation and frequencies from the official NATS AIP and FAA NASR
+  // datasets, plus labelled OurAirports community data where neither has an entry.
   const aerodromes = await buildAerodromes();
 
   fs.writeFileSync(path.join(DATA_DIR, 'uk-airports.json'), JSON.stringify(ukAirports));
@@ -241,6 +242,8 @@ async function main() {
           usAirfields: 'https://davidmegginson.github.io/ourairports-data/airports.csv',
           ukAerodromes: aerodromes.ukSource,
           usAerodromes: aerodromes.usSource,
+          communityAerodromes:
+            'https://davidmegginson.github.io/ourairports-data/runways.csv (public domain; only where no official entry exists, marked source: community)',
         },
         notes: {
           usVrps:

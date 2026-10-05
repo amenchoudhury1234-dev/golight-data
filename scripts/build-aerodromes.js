@@ -12,7 +12,8 @@
 // Output:
 //  - data/uk-aerodromes.json (bundled in the app as the offline fallback)
 //  - data/us-aerodromes.json (fetched at runtime, like the other US data)
-// Each: [{ icao, name, elevationFt, runways: [{ id, lengthM, widthM,
+// Each: [{ icao ('' for strips with no ICAO code), name, lat, lon, elevationFt,
+//   source: 'official' | 'community', runways: [{ id, lengthM, widthM,
 //   surface, ends: [{ id, trueBearing }] }], frequencies: [{ type, callSign, mhz }] }]
 //
 // Run standalone (node scripts/build-aerodromes.js) or from build-data.js.
@@ -102,10 +103,14 @@ async function buildUk() {
   for (const b of blocks(xml, 'AirportHeliport')) {
     const icao = field(b, 'locationIndicatorICAO');
     if (!icao || !/^E[GI][A-Z]{2}$|^EG[A-Z]{2}$/.test(icao)) continue;
+    const pos = b.match(/<aixm:ARP>[\s\S]*?<gml:pos[^>]*>\s*([-\d.]+)\s+([-\d.]+)\s*</);
     airports.set(uuid(b), {
       icao,
       name: field(b, 'name'),
+      lat: pos ? round(Number(pos[1]), 5) : null,
+      lon: pos ? round(Number(pos[2]), 5) : null,
       elevationFt: round(Number(field(b, 'fieldElevation'))),
+      source: 'official',
       runways: [],
       frequencies: [],
     });
@@ -253,7 +258,10 @@ async function buildUs() {
     const ap = {
       icao: r.ICAO_ID,
       name: r.ARPT_NAME,
+      lat: round(Number(r.LAT_DECIMAL), 5),
+      lon: round(Number(r.LONG_DECIMAL), 5),
       elevationFt: round(Number(r.ELEV)),
+      source: 'official',
       runways: [],
       frequencies: [],
     };
@@ -302,12 +310,166 @@ async function buildUs() {
   return { aerodromes: out, sourceUrl: `${NASR_BASE}/${cycle}_APT_CSV.zip` };
 }
 
+// ---------------------------------------------------------------------------
+// Community fallback - OurAirports (public domain)
+// ---------------------------------------------------------------------------
+// The official datasets cover licensed aerodromes (UK) and public-use ICAO
+// airports (US). Smaller fields - farm strips, private and unlicensed
+// airfields - only exist in community data. They're added ONLY where no
+// official entry exists (by ident, or an official aerodrome within ~1 NM),
+// and marked source: 'community' so the app labels them "community data -
+// check the official source". Official data always wins.
+
+const OA_BASE = 'https://davidmegginson.github.io/ourairports-data';
+const OA_TYPES = new Set(['small_airport', 'medium_airport', 'large_airport']);
+const OA_FREQ_TYPES = {
+  TWR: 'Tower',
+  GND: 'Ground',
+  ATIS: 'ATIS',
+  CTAF: 'CTAF',
+  UNIC: 'UNICOM',
+  'A/G': 'A/G Radio',
+  AFIS: 'Information (AFIS)',
+  APP: 'Approach',
+  RDO: 'A/G Radio',
+  INFO: 'Information (AFIS)',
+  'A/D': 'A/G Radio',
+};
+
+function oaSurface(s) {
+  const u = (s || '').toUpperCase();
+  if (/^ASP|ASPH|BIT|TAR/.test(u)) return 'ASPH';
+  if (/^CON|CONC|PEM/.test(u)) return 'CONC';
+  if (/GRS|GRASS|TURF/.test(u)) return 'GRASS';
+  if (/GRV|GRAVEL/.test(u)) return 'GRVL';
+  if (/DIRT|SOIL|SAND|CLAY/.test(u)) return 'DIRT';
+  return u || null;
+}
+
+function distanceNmLL(a, b) {
+  const k = Math.cos((((a.lat + b.lat) / 2) * Math.PI) / 180);
+  return Math.hypot((a.lat - b.lat) * 60, (a.lon - b.lon) * 60 * k);
+}
+
+// True bearing from one runway end to the other (great-circle initial bearing).
+function bearingBetween(lat1, lon1, lat2, lon2) {
+  const r = Math.PI / 180;
+  const y = Math.sin((lon2 - lon1) * r) * Math.cos(lat2 * r);
+  const x = Math.cos(lat1 * r) * Math.sin(lat2 * r) - Math.sin(lat1 * r) * Math.cos(lat2 * r) * Math.cos((lon2 - lon1) * r);
+  return ((Math.atan2(y, x) / r) + 360) % 360;
+}
+
+// A runway's ends with TRUE bearings, best source first:
+//  1. the published true heading;
+//  2. computed from the two runway-end coordinates (exact);
+//  3. UK only: the runway number x10 (magnetic). The number is the magnetic
+//     heading rounded to 10 deg (up to 5 deg off) and UK variation is ~0-2
+//     deg, so this is within ~8 deg of true - marked uncertaintyDeg: 8 and the
+//     app assumes the WORST crosswind inside that range. Not used for the US,
+//     where variation reaches ~16 deg.
+function runwayEnds(r, ukStyle) {
+  const le = r.le_heading_degT === '' ? NaN : Number(r.le_heading_degT);
+  const he = r.he_heading_degT === '' ? NaN : Number(r.he_heading_degT);
+  const ends = [];
+  // A "true heading" that is exactly the runway number x10 is almost always
+  // the MAGNETIC number copied in, not a surveyed true bearing - treat it as
+  // approximate: 5 deg of rounding plus variation (UK ~2, US up to ~16).
+  const copied = (id, h) => {
+    const m = (id || '').match(/^(\d{1,2})[LRCG]?$/);
+    return m ? Math.abs(Number(m[1]) * 10 - h) < 0.5 || Math.abs(Number(m[1]) * 10 - h - 360) < 0.5 : false;
+  };
+  const approx = ukStyle ? 8 : 20;
+  for (const [id, h] of [[r.le_ident, le], [r.he_ident, he]]) {
+    if (!id || !Number.isFinite(h)) continue;
+    ends.push(copied(id, h) ? { id, trueBearing: round(h, 1), uncertaintyDeg: approx } : { id, trueBearing: round(h, 1) });
+  }
+  if (ends.length) return ends;
+  const c = [r.le_latitude_deg, r.le_longitude_deg, r.he_latitude_deg, r.he_longitude_deg].map((v) => (v === '' ? NaN : Number(v)));
+  if (c.every(Number.isFinite) && (c[0] !== c[2] || c[1] !== c[3])) {
+    const b = bearingBetween(c[0], c[1], c[2], c[3]);
+    if (r.le_ident) ends.push({ id: r.le_ident, trueBearing: round(b, 1) });
+    if (r.he_ident) ends.push({ id: r.he_ident, trueBearing: round((b + 180) % 360, 1) });
+    return ends;
+  }
+  if (!ukStyle) return [];
+  for (const id of [r.le_ident, r.he_ident]) {
+    const m = (id || '').match(/^(\d{1,2})[LRCG]?$/);
+    if (m && Number(m[1]) >= 1 && Number(m[1]) <= 36) ends.push({ id, trueBearing: Number(m[1]) * 10, uncertaintyDeg: 8 });
+  }
+  return ends;
+}
+
+async function buildCommunity(official, countries) {
+  const ukStyle = countries.includes('GB');
+  const [airportsCsv, runwaysCsv, freqCsv] = await Promise.all(
+    ['airports.csv', 'runways.csv', 'airport-frequencies.csv'].map(async (f) => (await fetchOk(`${OA_BASE}/${f}`)).text()),
+  );
+  const officialIds = new Set(official.map((a) => a.icao));
+  const officialPts = official.filter((a) => a.lat != null && a.lon != null);
+  const out = new Map();
+  for (const a of parseCsv(airportsCsv)) {
+    if (!countries.includes(a.iso_country) || !OA_TYPES.has(a.type)) continue;
+    const ids = [a.icao_code, a.gps_code, a.ident].filter(Boolean);
+    if (ids.some((id) => officialIds.has(id))) continue;
+    const pt = { lat: Number(a.latitude_deg), lon: Number(a.longitude_deg) };
+    if (!Number.isFinite(pt.lat) || !Number.isFinite(pt.lon)) continue;
+    if (officialPts.some((o) => distanceNmLL(o, pt) < 1)) continue;
+    const icao = [a.icao_code, a.gps_code].find((id) => /^[A-Z]{4}$/.test(id || '')) || '';
+    out.set(a.ident, {
+      icao,
+      name: a.name,
+      lat: round(pt.lat, 5),
+      lon: round(pt.lon, 5),
+      elevationFt: a.elevation_ft === '' ? null : round(Number(a.elevation_ft)),
+      source: 'community',
+      runways: [],
+      frequencies: [],
+    });
+  }
+  for (const r of parseCsv(runwaysCsv)) {
+    const ap = out.get(r.airport_ident);
+    if (!ap || r.closed === '1') continue;
+    // Helipads and water lanes aren't runways for this purpose.
+    if (/^H\d*$/i.test(r.le_ident || '') || /WATER/i.test(r.surface || '')) continue;
+    const ends = runwayEnds(r, ukStyle);
+    if (ends.length === 0) continue; // no usable direction - the app checks the total wind instead
+    ap.runways.push({
+      id: [r.le_ident, r.he_ident].filter(Boolean).join('/'),
+      lengthM: r.length_ft ? round(Number(r.length_ft) * 0.3048) : null,
+      widthM: r.width_ft ? round(Number(r.width_ft) * 0.3048) : null,
+      surface: oaSurface(r.surface),
+      ends,
+    });
+  }
+  for (const f of parseCsv(freqCsv)) {
+    const ap = out.get(f.airport_ident);
+    const type = ap && OA_FREQ_TYPES[(f.type || '').toUpperCase()];
+    const mhz = Number(f.frequency_mhz);
+    if (!type || !(mhz >= 118 && mhz < 137) || EMERGENCY(mhz)) continue;
+    const val = String(f.frequency_mhz);
+    const existing = ap.frequencies.find((x) => x.type === type);
+    if (existing) {
+      if (!existing.mhz.includes(val)) existing.mhz.push(val);
+    } else ap.frequencies.push({ type, callSign: f.description || null, mhz: [val] });
+  }
+  return [...out.values()];
+}
+
 // Make each runway usable for wind maths, or drop it:
 //  - closed ("X" in the designator) or zero-length entries go;
 //  - a runway listed with only ONE end gets the opposite end (+180 deg) so
 //    it isn't treated as one-way (which would invent tailwinds);
 //  - a runway with no known bearing at all goes (the app then checks the
 //    total wind for that airfield rather than guess a direction).
+// "06" -> "24", "09L" -> "27R", "18G" -> "36G"; null if not a runway number.
+function reciprocalId(id) {
+  const m = (id || '').match(/^(\d{1,2})([LRCG]?)$/);
+  if (!m || Number(m[1]) < 1 || Number(m[1]) > 36) return null;
+  const n = ((Number(m[1]) + 17) % 36) + 1;
+  const side = { L: 'R', R: 'L' }[m[2]] || m[2];
+  return `${String(n).padStart(2, '0')}${side}`;
+}
+
 function cleanRunways(list) {
   return list
     .map((a) => ({
@@ -318,9 +480,13 @@ function cleanRunways(list) {
           if (r.ends.length !== 1) return r;
           const [only] = r.ends;
           const ids = r.id.split('/');
-          const otherId = ids.find((x) => x !== only.id);
+          const otherId = ids.find((x) => x !== only.id) || reciprocalId(only.id);
           if (!otherId) return r;
-          return { ...r, ends: [only, { id: otherId, trueBearing: Math.round(((only.trueBearing + 180) % 360) * 10) / 10 }] };
+          return {
+            ...r,
+            id: ids.length > 1 ? r.id : `${only.id}/${otherId}`,
+            ends: [only, { ...only, id: otherId, trueBearing: Math.round(((only.trueBearing + 180) % 360) * 10) / 10 }],
+          };
         })
         .filter((r) => r.ends.length > 0),
     }))
@@ -331,12 +497,16 @@ async function buildAerodromes() {
   const uk = await buildUk();
   const us = await buildUs();
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  uk.aerodromes = cleanRunways(uk.aerodromes);
-  us.aerodromes = cleanRunways(us.aerodromes);
+  const ukCommunity = cleanRunways(await buildCommunity(uk.aerodromes, ['GB', 'IM', 'JE', 'GG']));
+  const usCommunity = cleanRunways(await buildCommunity(us.aerodromes, ['US']));
+  uk.aerodromes = [...cleanRunways(uk.aerodromes), ...ukCommunity];
+  us.aerodromes = [...cleanRunways(us.aerodromes), ...usCommunity];
   fs.writeFileSync(path.join(DATA_DIR, 'uk-aerodromes.json'), JSON.stringify(uk.aerodromes));
   fs.writeFileSync(path.join(DATA_DIR, 'us-aerodromes.json'), JSON.stringify(us.aerodromes));
   fs.rmSync(TMP_DIR, { recursive: true, force: true });
-  console.log(`UK aerodromes: ${uk.aerodromes.length}, US aerodromes: ${us.aerodromes.length}`);
+  console.log(
+    `UK aerodromes: ${uk.aerodromes.length} (${ukCommunity.length} community), US aerodromes: ${us.aerodromes.length} (${usCommunity.length} community)`,
+  );
   return { ukCount: uk.aerodromes.length, usCount: us.aerodromes.length, ukSource: uk.sourceUrl, usSource: us.sourceUrl };
 }
 
