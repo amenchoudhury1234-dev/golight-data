@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-10-12T09:58:43.004Z",
+  "generatedAt": "2026-10-19T08:15:20.735Z",
   "counts": {
-    "ukAirports": 155,
+    "ukAirports": 157,
     "vrps": 404,
     "ukAirfields": 448,
     "usAirports": 1764,
-    "usAirfields": 22571,
+    "usAirfields": 22570,
     "ukAerodromes": 301,
     "usAerodromes": 12506,
     "ukFixes": 1177
