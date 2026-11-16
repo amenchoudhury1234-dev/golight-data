@@ -1,23 +1,23 @@
 {
-  "generatedAt": "2026-10-26T08:16:01.068Z",
+  "generatedAt": "2026-11-16T10:21:14.504Z",
   "counts": {
     "ukAirports": 157,
     "vrps": 404,
-    "ukAirfields": 448,
+    "ukAirfields": 447,
     "usAirports": 1764,
-    "usAirfields": 22565,
+    "usAirfields": 22566,
     "ukAerodromes": 301,
-    "usAerodromes": 12505,
+    "usAerodromes": 12510,
     "ukFixes": 1177
   },
   "sources": {
     "airports": "https://davidmegginson.github.io/ourairports-data/airports.csv",
     "vrps": "https://nats-uk.ead-it.com/cms-nats/export/sites/default/en/Publications/digital-datasets/VRP/EG_VRP_DS_AREA1_FULL_20260903_CSV.zip",
-    "ukAirfields": "https://nats-uk.ead-it.com/cms-nats/opencms/en/Charts/vfr-charts/Resources/VFR-Database-Unlicensed-Military-and-Foreign-Aerosites-06-Aug-2026.csv",
+    "ukAirfields": "https://nats-uk.ead-it.com/cms-nats/opencms/en/Charts/vfr-charts/Resources/VFR-Database-Unlicensed-Military-and-Foreign-Aerosites-29-Oct-2026.csv",
     "usAirfields": "https://davidmegginson.github.io/ourairports-data/airports.csv",
-    "ukAerodromes": "https://nats-uk.ead-it.com/cms-nats/export/sites/default/en/Publications/digital-datasets/ICAO_AIP/EG_AIP_DS_20261001_XML.zip",
-    "usAerodromes": "https://nfdc.faa.gov/webContent/28DaySub/extra/01_Oct_2026_APT_CSV.zip",
-    "ukFixes": "https://nats-uk.ead-it.com/cms-nats/export/sites/default/en/Publications/digital-datasets/ICAO_AIP/EG_AIP_DS_20261001_XML.zip",
+    "ukAerodromes": "https://nats-uk.ead-it.com/cms-nats/export/sites/default/en/Publications/digital-datasets/ICAO_AIP/EG_AIP_DS_20261029_XML.zip",
+    "usAerodromes": "https://nfdc.faa.gov/webContent/28DaySub/extra/29_Oct_2026_APT_CSV.zip",
+    "ukFixes": "https://nats-uk.ead-it.com/cms-nats/export/sites/default/en/Publications/digital-datasets/ICAO_AIP/EG_AIP_DS_20261029_XML.zip",
     "communityAerodromes": "https://davidmegginson.github.io/ourairports-data/runways.csv (public domain; only where no official entry exists, marked source: community)"
   },
   "notes": {
